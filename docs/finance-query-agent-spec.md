@@ -210,7 +210,7 @@ class AmountConvention:
     sign_means_expense: Literal["positive", "negative"] | None = None
 ```
 
-Exactly one of the two options must be set. The SDK uses this to generate the correct `WHERE` clause when filtering for expenses (all spending tools) or income. When a tool needs "total spending," the SDK filters to expenses only. When a tool needs "all transactions" (e.g., `search_transactions`), no direction filter is applied.
+Exactly one of the two options must be set — schema validation rejects configurations where both are set or neither is set. The SDK uses this to generate the correct `WHERE` clause when filtering for expenses (all spending tools) or income. When a tool needs "total spending," the SDK filters to expenses only. When a tool needs "all transactions" (e.g., `search_transactions`), no direction filter is applied.
 
 ### 6.4 `JoinDef` — Table Joins
 
@@ -265,7 +265,7 @@ On `create_agent()`, the SDK MUST:
 3. For tables with `user_scoped=False`: skip user_id validation.
 4. Verify all `JoinDef` conditions reference valid columns on both sides.
 5. Verify all `ColumnRef` entries point to a table that has a corresponding `JoinDef`.
-6. Verify `AmountConvention` is set on every transaction table and references valid columns.
+6. Verify `AmountConvention` is set on every transaction table, references valid columns, and has exactly one of the two convention options set (direction column OR sign-based, not both, not neither).
 7. If `balance` column is not mapped, disable `get_balance_summary` and log a warning.
 8. Raise a clear error if any mapping is invalid, specifying exactly which table/column is wrong.
 
@@ -479,6 +479,67 @@ agent = create_agent(
 ```
 
 **Database URL format:** Raw `asyncpg` format: `postgresql://user:pass@host:port/dbname`. Not SQLAlchemy format (no `+asyncpg` dialect prefix). The SDK creates an `asyncpg` connection pool directly.
+
+### 9.1.1 Connection Pool Lifecycle
+
+`create_agent()` returns a `FinanceQueryAgent` instance that manages an `asyncpg` connection pool. The agent supports async context manager protocol for clean resource management:
+
+```python
+# Option A: async context manager (preferred)
+async with create_agent(db_url=..., schema=..., model=...) as agent:
+    result = await agent.run("How much did I spend?", user_id="user-123")
+
+# Option B: manual lifecycle
+agent = create_agent(db_url=..., schema=..., model=...)
+await agent.connect()       # Creates the asyncpg pool, validates schema
+try:
+    result = await agent.run("...", user_id="user-123")
+finally:
+    await agent.close()     # Drains and closes the pool
+```
+
+`connect()` is called automatically on first `run()` if not already connected. `close()` MUST be called by the consumer to avoid leaking connections. The async context manager handles both.
+
+### 9.1.2 `run()` Method
+
+```python
+async def run(
+    self,
+    question: str,              # Natural language question
+    user_id: str,               # User ID for row-level isolation
+) -> AgentResponse:
+    """
+    Run the agent on a natural language question.
+
+    Raises:
+        FinanceQueryError: Base exception for all SDK errors.
+        ConnectionError: Pool not connected or DB unreachable.
+        QueryTimeoutError: A query exceeded the configured timeout.
+        LLMError: LLM API call failed (rate limit, auth, network).
+        SchemaValidationError: Schema mapping is invalid (raised during connect()).
+    """
+```
+
+### 9.1.3 Exception Hierarchy
+
+```python
+class FinanceQueryError(Exception):
+    """Base exception for all SDK errors."""
+
+class SchemaValidationError(FinanceQueryError):
+    """Schema mapping does not match the live database."""
+
+class ConnectionError(FinanceQueryError):
+    """Database connection pool error (creation, health, closure)."""
+
+class QueryTimeoutError(FinanceQueryError):
+    """A query exceeded the configured timeout."""
+
+class LLMError(FinanceQueryError):
+    """LLM API call failed (rate limit, auth, network, unexpected response)."""
+```
+
+All exceptions inherit from `FinanceQueryError` so consumers can catch broadly or narrowly. Raw `asyncpg` and `httpx` exceptions are never surfaced directly.
 
 ### 9.2 Hooks
 
@@ -719,5 +780,4 @@ The `SchemaMapping` model is part of the SDK's public API. Changes to it follow 
 
 ## 17. Open Questions
 
-1. **Model choice for v1:** OpenAI GPT-4o (cheapest capable option for tool-calling) or Claude Sonnet? The SDK is model-agnostic but we need a default for testing.
-2. **Currency handling:** The SDK returns per-currency breakdowns. Should the LLM present all currencies, or should the system prompt instruct it to highlight the "primary" currency? If so, how is primary currency determined?
+1. **Currency handling:** The SDK returns per-currency breakdowns. Should the LLM present all currencies, or should the system prompt instruct it to highlight the "primary" currency? If so, how is primary currency determined?

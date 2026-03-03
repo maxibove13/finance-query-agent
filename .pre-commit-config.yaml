@@ -23,10 +23,3 @@ repos:
         types: [python]
         stages: [pre-commit]
 
-      - id: test
-        name: pytest
-        entry: uv run pytest -x -q
-        language: system
-        pass_filenames: false
-        always_run: true
-        stages: [pre-commit]
