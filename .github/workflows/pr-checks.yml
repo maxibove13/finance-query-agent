@@ -138,7 +138,8 @@ jobs:
         uses: anthropics/claude-code-action@beta
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          prompt: |
+          allowed_tools: "Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr comment:*),Bash(gh api:*),Read,Glob,Grep"
+          direct_prompt: |
             You are a code reviewer for PR #${{ github.event.pull_request.number }} in ${{ github.repository }}.
 
             Review the PR diff by running: gh pr diff ${{ github.event.pull_request.number }}
@@ -171,7 +172,6 @@ jobs:
             VERDICT: FAIL
 
             Use FAIL only for critical issues listed above.
-          claude_args: '--allowed-tools "Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr comment:*),Bash(gh api:*),Read,Glob,Grep"'
 
       - name: Check verdict
         run: |
