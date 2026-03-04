@@ -20,6 +20,5 @@ repos:
         entry: uv run mypy src/
         language: system
         pass_filenames: false
-        types: [python]
-        stages: [pre-commit]
+        always_run: true
 

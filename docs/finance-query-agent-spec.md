@@ -1,17 +1,17 @@
-# Finance Query Agent SDK — Specification Requirements
+# Finance Query Agent — Specification Requirements
 
 ## 1. Context & Motivation
 
-This SDK originates from [my_personal_incomes_ai](https://github.com/facusorg/my_personal_incomes_ai), a personal finance application that processes bank statements (PDF/CSV), uses AI to extract and categorize transactions, and displays spending analytics. The stack is FastAPI + PostgreSQL on the backend, React + TypeScript on the frontend, with Pydantic AI (OpenAI + Mistral) powering the parsing pipeline.
+This service originates from [my_personal_incomes_ai](https://github.com/facusorg/my_personal_incomes_ai), a personal finance application that processes bank statements (PDF/CSV), uses AI to extract and categorize transactions, and displays spending analytics. The stack is FastAPI + PostgreSQL on the backend, React + TypeScript on the frontend, with Pydantic AI (OpenAI + Mistral) powering the parsing pipeline.
 
 The app already handles the full import flow — upload, text extraction, AI parsing, keyword-based categorization — and stores structured transaction data across multiple tables (`account_movements`, `credit_card_movements`, `tags`, `accounts`, etc.). What it lacks is a way for users to **ask questions about their data in natural language**.
 
-Rather than building this capability as a tightly coupled feature inside the app, we're extracting it into a standalone, open-source SDK. This serves two purposes:
+Rather than building this capability as a tightly coupled feature inside the app, we're extracting it into a standalone service. This serves two purposes:
 
 1. **For the app**: adds a differentiating, monetizable feature — an AI financial assistant that answers spending questions with reliable, auditable results.
-2. **For the community**: provides a reusable library that any application with a financial database can integrate by providing a schema mapping, without writing query logic.
+2. **For the community**: provides a reusable, deployable service that any application with a financial database can integrate by providing a schema mapping, without writing query logic.
 
-The SDK is designed as the first consumer's needs dictate (our app's schema, our data model's quirks), but generic enough that other financial applications can adopt it.
+The service is designed as the first consumer's needs dictate (our app's schema, our data model's quirks), but generic enough that other financial applications can adopt it.
 
 ## 2. Problem Statement
 
@@ -19,77 +19,52 @@ Users of financial applications need to ask natural language questions about the
 
 ## 3. Goals
 
-- Provide a **public, pip-installable Python SDK** (`finance-query-agent`) that any application with a financial database can integrate.
+- Provide a **deployed financial query service** (`finance-query-agent`) that any application with a financial database can integrate via HTTP.
 - Use **Pydantic AI** as the agent framework.
 - Implement a **tools-as-wrappers** architecture: the LLM selects which tool to call and with what parameters; the tool executes a predefined, parameterized query.
 - Include a **constrained SQL generation tool** as a fallback for queries not covered by predefined tools.
-- **Configuration-driven integration**: clients provide a declarative schema mapping (table names, column names, joins). The SDK generates all queries internally. No adapter code to write.
+- **Configuration-driven integration**: clients provide a declarative schema mapping (table names, column names, joins). The service generates all queries internally. No adapter code to write.
 
 ## 4. Non-Goals
 
-- Not a hosted service. The SDK is a library consumed by application code.
 - Not a BI/analytics platform. No dashboards, no visualizations, no semantic layer.
 - No write operations. The agent is strictly read-only.
 - No multi-database support in v1. PostgreSQL only. The schema mapping approach allows future database backends.
-- No conversation memory in v1. Each query is stateless. Memory can be added by the consuming application or in a future version.
-- No custom tool overrides or extension points. The SDK provides a fixed set of tools. If a question can't be answered by those tools, the constrained SQL fallback handles it.
+- No custom tool overrides or extension points. The service provides a fixed set of tools. If a question can't be answered by those tools, the constrained SQL fallback handles it.
 
 ## 5. Architecture
 
 ```
-┌──────────────────────────────────────────────────────┐
-│  Consuming Application (e.g. my_personal_incomes_ai) │
-│                                                      │
-│  ┌───────────────┐    ┌───────────────────────────┐  │
-│  │ API endpoint  │───>│ SchemaMapping config      │  │
-│  │ (chat/query)  │    │ (table names, columns,    │  │
-│  └───────────────┘    │  joins — declarative)     │  │
-│                       └─────────────┬─────────────┘  │
-└─────────────────────────────────────┼────────────────┘
-                                      │
-┌─────────────────────────────────────┼────────────────┐
-│  finance-query-agent SDK            │                │
-│                                     ▼                │
-│  ┌──────────────────────────────────────────────┐    │
-│  │  Query Builder (generates parameterized SQL  │    │
-│  │  from SchemaMapping + tool parameters)       │    │
-│  └──────────────────────┬───────────────────────┘    │
-│                         │                            │
-│  ┌──────────────────────▼───────────────────────┐    │
-│  │  Pydantic AI Agent                           │    │
-│  │                                              │    │
-│  │  Tools:                                      │    │
-│  │  ├── get_spending_by_category                │    │
-│  │  ├── get_monthly_totals                      │    │
-│  │  ├── get_top_merchants                       │    │
-│  │  ├── compare_periods                         │    │
-│  │  ├── search_transactions                     │    │
-│  │  ├── get_category_breakdown                  │    │
-│  │  ├── get_spending_trend                      │    │
-│  │  ├── get_balance_summary                     │    │
-│  │  ├── get_recurring_expenses                  │    │
-│  │  └── [fallback] run_constrained_query        │    │
-│  └──────────────────────────────────────────────┘    │
-│                         │                            │
-│  ┌──────────────────────▼───────────────────────┐    │
-│  │  PostgreSQL (asyncpg, read-only connection)  │    │
-│  └──────────────────────────────────────────────┘    │
-└──────────────────────────────────────────────────────┘
+Client (SigV4) ──> Function URL ──> Agent Lambda
+                                     ├── Pydantic AI Agent
+                                     │   ├── get_spending_by_category
+                                     │   ├── get_monthly_totals
+                                     │   ├── get_top_merchants
+                                     │   ├── compare_periods
+                                     │   ├── search_transactions
+                                     │   ├── get_category_breakdown
+                                     │   ├── get_spending_trend
+                                     │   ├── get_balance_summary
+                                     │   ├── get_recurring_expenses
+                                     │   └── [fallback] run_constrained_query
+                                     ├── Query Builder (SchemaMapping → parameterized SQL)
+                                     ├── asyncpg → RDS (read-only, single connection)
+                                     ├── DynamoDB (encrypted conversation history)
+                                     └── Logfire (PII-scrubbed traces)
 ```
 
-**The SDK owns:** agent definition, tool definitions, query building, prompt engineering, response formatting, SQL validation, database connection management.
+**The service owns:** agent definition, tool definitions, query building, prompt engineering, response formatting, SQL validation, database connection management, conversation memory, observability, PII protection.
 
-**The consuming app owns:** schema mapping configuration, API exposure, authentication, rate limiting.
+**The consuming app owns:** schema mapping configuration (via Terraform), authentication (AWS IAM on Function URL), user identity.
 
 ## 6. Schema Mapping (Client Integration)
 
-This is the only thing a client needs to provide. A declarative configuration that tells the SDK where financial data lives in their database.
+This is the only thing a client needs to provide. A declarative configuration that tells the service where financial data lives in their database. Passed as JSON via the `SCHEMA_CONFIG_JSON` environment variable (or `SCHEMA_CONFIG_PATH` for a file).
 
 ### 6.1 Configuration Model
 
 ```python
 from finance_query_agent import (
-    create_agent,
     SchemaMapping,
     TableMapping,
     JoinDef,
@@ -193,11 +168,11 @@ class ColumnRef:
     column: str  # The column on that table
 ```
 
-The SDK resolves `ColumnRef` by finding the matching `JoinDef` in the table's `joins` list. If no join to the referenced table exists, schema validation fails at startup.
+The service resolves `ColumnRef` by finding the matching `JoinDef` in the table's `joins` list. If no join to the referenced table exists, schema validation fails at startup.
 
 ### 6.3 `AmountConvention` — Expense vs. Income
 
-Financial databases represent transaction direction differently. The SDK supports two conventions:
+Financial databases represent transaction direction differently. The service supports two conventions:
 
 ```python
 class AmountConvention:
@@ -210,7 +185,7 @@ class AmountConvention:
     sign_means_expense: Literal["positive", "negative"] | None = None
 ```
 
-Exactly one of the two options must be set — schema validation rejects configurations where both are set or neither is set. The SDK uses this to generate the correct `WHERE` clause when filtering for expenses (all spending tools) or income. When a tool needs "total spending," the SDK filters to expenses only. When a tool needs "all transactions" (e.g., `search_transactions`), no direction filter is applied.
+Exactly one of the two options must be set — schema validation rejects configurations where both are set or neither is set. The service uses this to generate the correct `WHERE` clause when filtering for expenses (all spending tools) or income. When a tool needs "total spending," the service filters to expenses only. When a tool needs "all transactions" (e.g., `search_transactions`), no direction filter is applied.
 
 ### 6.4 `JoinDef` — Table Joins
 
@@ -244,11 +219,11 @@ Optional columns:
 
 ### 6.6 `user_scoped` Flag
 
-Tables that are shared/global (no `user_id` column) MUST set `user_scoped=False`. Default is `True`. The SDK will NOT inject user filtering on tables marked `user_scoped=False`. User isolation on transaction queries comes from the `user_id` mapping on the transactions table (whether direct or via `ColumnRef`).
+Tables that are shared/global (no `user_id` column) MUST set `user_scoped=False`. Default is `True`. The service will NOT inject user filtering on tables marked `user_scoped=False`. User isolation on transaction queries comes from the `user_id` mapping on the transactions table (whether direct or via `ColumnRef`).
 
-### 6.7 What the SDK Derives from the Mapping
+### 6.7 What the Service Derives from the Mapping
 
-| SDK gets | From |
+| Service gets | From |
 |----------|------|
 | All predefined tool queries | Column mappings + join definitions + amount convention |
 | Expense/income filtering | `AmountConvention` on each transaction table |
@@ -259,7 +234,7 @@ Tables that are shared/global (no `user_id` column) MUST set `user_scoped=False`
 
 ### 6.8 Schema Validation
 
-On `create_agent()`, the SDK MUST:
+On startup (first request), the service MUST:
 1. Connect to the database and verify all mapped tables and columns exist.
 2. For tables with `user_scoped=True` (default): verify the `user_id` column exists, either directly or as a `ColumnRef` with a valid join path.
 3. For tables with `user_scoped=False`: skip user_id validation.
@@ -271,9 +246,9 @@ On `create_agent()`, the SDK MUST:
 
 ## 7. Predefined Tools
 
-Each tool accepts typed parameters (Pydantic models) and returns structured results. The agent selects the tool and fills the parameters; the SDK's query builder generates and executes the SQL using the schema mapping.
+Each tool accepts typed parameters (Pydantic models) and returns structured results. The agent selects the tool and fills the parameters; the service's query builder generates and executes the SQL using the schema mapping.
 
-**Note on query complexity:** Predefined tools may use CTEs, subqueries, and window functions internally. The "no subqueries" restriction (R7) applies only to the LLM-generated SQL in the fallback tool, not to the SDK's own query builder.
+**Note on query complexity:** Predefined tools may use CTEs, subqueries, and window functions internally. The "no subqueries" restriction (R7) applies only to the LLM-generated SQL in the fallback tool, not to the service's own query builder.
 
 ### 7.1 `get_spending_by_category`
 
@@ -391,7 +366,7 @@ ORDER BY account_id, date DESC
 
 Returns: `list[AccountSummary]` — each with `account_name`, `latest_balance`, `last_transaction_date`, `currency`.
 
-If `balance` is not mapped in the schema, the SDK disables this tool (it is not registered with the agent) and logs a warning at startup.
+If `balance` is not mapped in the schema, the service disables this tool (it is not registered with the agent) and logs a warning at startup.
 
 ### 7.9 `get_recurring_expenses`
 
@@ -442,9 +417,9 @@ Handles queries that don't map to any predefined tool. The agent generates SQL, 
 
 **R6 — Schema context injection.** The tool's prompt includes the whitelisted table schemas (column names, types, descriptions, foreign key relationships) derived from the `SchemaMapping` and introspected from the database.
 
-**R7 — No subqueries in v1.** LLM-generated SQL must be a single `SELECT` statement. CTEs, subqueries, `DO` blocks, and multiple statements are rejected. This constraint can be relaxed in future versions after validation. (Note: this restriction applies only to the fallback tool, not to the SDK's predefined tools which use CTEs/subqueries internally.)
+**R7 — No subqueries in v1.** LLM-generated SQL must be a single `SELECT` statement. CTEs, subqueries, `DO` blocks, and multiple statements are rejected. This constraint can be relaxed in future versions after validation. (Note: this restriction applies only to the fallback tool, not to the service's predefined tools which use CTEs/subqueries internally.)
 
-**R8 — User isolation injection.** The tool MUST automatically inject user scoping using the `user_id` mapping (resolving `ColumnRef` + JOINs as needed). The LLM-generated SQL MUST NOT contain any `user_id` condition — the SDK strips any LLM-generated user filtering and replaces it with its own.
+**R8 — User isolation injection.** The tool MUST automatically inject user scoping using the `user_id` mapping (resolving `ColumnRef` + JOINs as needed). The LLM-generated SQL MUST NOT contain any `user_id` condition — the service strips any LLM-generated user filtering and replaces it with its own.
 
 **R9 — Audit logging.** Every query generated by this tool MUST be logged with: the original natural language question, the generated SQL, whether it passed validation, whether it was executed, the execution time, and the row count returned.
 
@@ -452,53 +427,39 @@ Handles queries that don't map to any predefined tool. The agent generates SQL, 
 
 ## 9. Agent Configuration
 
-### 9.1 `create_agent()` Signature
+### 9.1 Service Entry Point
 
-```python
-from finance_query_agent import create_agent, SchemaMapping
+The service is deployed as an AWS Lambda behind a Function URL with IAM authorization. The entry point is `handler.handler` which receives an HTTP POST request and returns a JSON response.
 
-agent = create_agent(
-    # Required
-    db_url: str,                          # asyncpg-compatible: "postgresql://user:pass@host/db"
-    schema: SchemaMapping,
-    model: str,                           # Pydantic AI model string: "openai:gpt-4o", "anthropic:claude-sonnet"
+```
+POST <function-url>
+Authorization: AWS SigV4
+Content-Type: application/json
 
-    # Fallback configuration
-    fallback_enabled: bool = True,
-    fallback_max_retries: int = 3,
-    fallback_query_timeout_seconds: int = 30,
-    fallback_result_limit: int = 200,
-
-    # Hooks (all optional)
-    pre_llm_hook: Callable[[PreLlmHookContext], PreLlmHookContext] | None = None,
-    on_tool_call: Callable[[ToolCallEvent], None] | None = None,
-
-    # Prompt
-    system_prompt_override: str | None = None,
-)
+{
+  "user_id": "user-123",
+  "session_id": "session-abc",
+  "question": "How much did I spend on groceries last month?"
+}
 ```
 
-**Database URL format:** Raw `asyncpg` format: `postgresql://user:pass@host:port/dbname`. Not SQLAlchemy format (no `+asyncpg` dialect prefix). The SDK creates an `asyncpg` connection pool directly.
+Configuration is via environment variables (set by Terraform):
 
-### 9.1.1 Connection Pool Lifecycle
+| Variable | Description |
+|----------|-------------|
+| `SCHEMA_CONFIG_JSON` | SchemaMapping JSON |
+| `LLM_MODEL` | Pydantic AI model string (default: `openai:gpt-4o`) |
+| `DYNAMODB_TABLE` | DynamoDB table for conversation memory |
+| `DB_CREDENTIALS_SECRET_ARN` | Secrets Manager ARN for DB credentials |
+| `ENCRYPTION_KEY_SECRET_ARN` | Secrets Manager ARN for Fernet key |
+| `LLM_API_KEY_SECRET_ARN` | Secrets Manager ARN for LLM API key |
+| `LOGFIRE_TOKEN_SECRET_ARN` | Secrets Manager ARN for Logfire token (optional) |
 
-`create_agent()` returns a `FinanceQueryAgent` instance that manages an `asyncpg` connection pool. The agent supports async context manager protocol for clean resource management:
+### 9.1.1 Connection Lifecycle
 
-```python
-# Option A: async context manager (preferred)
-async with create_agent(db_url=..., schema=..., model=...) as agent:
-    result = await agent.run("How much did I spend?", user_id="user-123")
+The Lambda uses a single `asyncpg.connect()` per invocation (no pool). This matches Lambda's single-concurrent-request model. The connection is opened at the start of `_process_request` and closed in a `finally` block.
 
-# Option B: manual lifecycle
-agent = create_agent(db_url=..., schema=..., model=...)
-await agent.connect()       # Creates the asyncpg pool, validates schema
-try:
-    result = await agent.run("...", user_id="user-123")
-finally:
-    await agent.close()     # Drains and closes the pool
-```
-
-`connect()` is called automatically on first `run()` if not already connected. `close()` MUST be called by the consumer to avoid leaking connections. The async context manager handles both.
+**Database URL format:** Raw `asyncpg` format: `postgresql://user:pass@host:port/dbname`. Resolved from Secrets Manager at runtime (JSON secret with `username`, `password`, `host`, `port`, `dbname`).
 
 ### 9.1.2 `run()` Method
 
@@ -512,8 +473,8 @@ async def run(
     Run the agent on a natural language question.
 
     Raises:
-        FinanceQueryError: Base exception for all SDK errors.
-        ConnectionError: Pool not connected or DB unreachable.
+        FinanceQueryError: Base exception for all service errors.
+        DatabaseConnectionError: Pool not connected or DB unreachable.
         QueryTimeoutError: A query exceeded the configured timeout.
         LLMError: LLM API call failed (rate limit, auth, network).
         SchemaValidationError: Schema mapping is invalid (raised during connect()).
@@ -524,12 +485,12 @@ async def run(
 
 ```python
 class FinanceQueryError(Exception):
-    """Base exception for all SDK errors."""
+    """Base exception for all service errors."""
 
 class SchemaValidationError(FinanceQueryError):
     """Schema mapping does not match the live database."""
 
-class ConnectionError(FinanceQueryError):
+class DatabaseConnectionError(FinanceQueryError):
     """Database connection pool error (creation, health, closure)."""
 
 class QueryTimeoutError(FinanceQueryError):
@@ -550,7 +511,7 @@ class PreLlmHookContext:
     tool_name: str
     tool_results: list[dict]     # The rows about to be sent to the LLM
 
-# Return a modified PreLlmHookContext. The SDK sends the returned version to the LLM.
+# Return a modified PreLlmHookContext. The service sends the returned version to the LLM.
 # Must be synchronous. Must not raise — if it does, the tool call fails.
 ```
 
@@ -607,9 +568,9 @@ The consuming application decides how to present this to the user (chat UI, API 
 
 ## 11. Multi-Currency Behavior
 
-Financial data often spans multiple currencies. The SDK handles this consistently across all tools:
+Financial data often spans multiple currencies. The service handles this consistently across all tools:
 
-- **Aggregation tools** (`get_spending_by_category`, `get_monthly_totals`, `get_top_merchants`, `compare_periods`, `get_category_breakdown`, `get_spending_trend`): Results are grouped per currency. The SDK never converts or sums across currencies. A user with USD and UYU transactions gets separate rows for each.
+- **Aggregation tools** (`get_spending_by_category`, `get_monthly_totals`, `get_top_merchants`, `compare_periods`, `get_category_breakdown`, `get_spending_trend`): Results are grouped per currency. The service never converts or sums across currencies. A user with USD and UYU transactions gets separate rows for each.
 - **Search tools** (`search_transactions`): Return the raw currency per transaction.
 - **Balance tool** (`get_balance_summary`): Returns per-account, which is inherently per-currency.
 - **Recurring tool** (`get_recurring_expenses`): Groups by (description, currency) — a Netflix charge in USD and one in EUR are separate recurring items.
@@ -619,9 +580,9 @@ Financial data often spans multiple currencies. The SDK handles this consistentl
 
 | Requirement | Description |
 |-------------|-------------|
-| **S1 — User isolation** | Every query is scoped to a `user_id`. The SDK injects user filtering using the mapped `user_id` column (direct or via `ColumnRef` + JOIN). Tables marked `user_scoped=False` (e.g., shared category tables) are not filtered. The LLM never controls user scoping. |
-| **S2 — No credential exposure** | The `db_url` is used internally to create a connection pool. The SDK never logs or transmits connection strings. |
-| **S3 — Read-only** | No tool, including the fallback, can modify data. Enforced at connection level (read-only DB role, the security boundary) and SDK level (keyword rejection, defense-in-depth). |
+| **S1 — User isolation** | Every query is scoped to a `user_id`. The service injects user filtering using the mapped `user_id` column (direct or via `ColumnRef` + JOIN). Tables marked `user_scoped=False` (e.g., shared category tables) are not filtered. The LLM never controls user scoping. |
+| **S2 — No credential exposure** | The `database_url` is resolved from Secrets Manager at runtime. The service never logs or transmits connection strings. |
+| **S3 — Read-only** | No tool, including the fallback, can modify data. Enforced at connection level (read-only DB role, the security boundary) and service level (keyword rejection, defense-in-depth). |
 | **S4 — Input sanitization** | Tool parameters are validated via Pydantic models. All queries use parameterized values (`$1`, `$2`, etc.). The fallback tool validates generated SQL structure before execution. |
 | **S5 — PII in LLM context** | Transaction descriptions sent to the LLM may contain PII (merchant names, amounts). The consuming application is responsible for PII handling policy via the `pre_llm_hook`. |
 
@@ -637,13 +598,13 @@ Financial data often spans multiple currencies. The SDK handles this consistentl
 ## 14. Repository Structure
 
 ```
-finance-query-agent/                  <- Public repo (pip-installable)
+finance-query-agent/
 ├── src/
 │   └── finance_query_agent/
-│       ├── __init__.py               <- Public API: create_agent, SchemaMapping, etc.
+│       ├── __init__.py               <- Package exports: SchemaMapping, exceptions, etc.
 │       ├── agent.py                  <- Pydantic AI agent definition
 │       ├── query_builder.py          <- Generates parameterized SQL from SchemaMapping + tool params
-│       ├── connection.py             <- asyncpg connection pool, read-only enforcement
+│       ├── connection.py             <- asyncpg single connection (Lambda-aware)
 │       ├── tools/
 │       │   ├── __init__.py
 │       │   ├── spending.py           <- get_spending_by_category, get_monthly_totals, get_balance_summary
@@ -677,107 +638,94 @@ finance-query-agent/                  <- Public repo (pip-installable)
 
 ## 15. Integration with my_personal_incomes_ai
 
-The private repo adds a single configuration file and an API endpoint:
+The consuming app deploys the finance-query-agent as an AWS Lambda via the Terraform module, providing the SchemaMapping as JSON. The frontend calls the Function URL with SigV4 auth.
 
+**Terraform integration:**
+
+```hcl
+module "finance_agent" {
+  source = "../finance-query-agent/terraform"
+
+  vpc_id                    = module.vpc.vpc_id
+  subnet_ids                = module.vpc.private_subnets
+  rds_security_group_id     = aws_security_group.rds.id
+  rds_endpoint              = aws_db_instance.main.endpoint
+  db_credentials_secret_arn = aws_secretsmanager_secret.agent_readonly_db.arn
+  encryption_key_secret_arn = aws_secretsmanager_secret.fernet_key.arn
+  llm_api_key_secret_arn    = aws_secretsmanager_secret.openai_key.arn
+  allowed_origins           = ["https://app.example.com"]
+  authorized_caller_arns    = [aws_iam_role.backend.arn]
+  schema_config_json        = file("${path.module}/agent_schema.json")
+  ecr_image_uri             = "${module.finance_agent.ecr_repository_url}:latest"
+}
 ```
-app/
-├── services/
-│   └── query_agent.py            <- SchemaMapping config + create_agent() call
-├── api/
-│   └── chat_endpoints.py        <- POST /api/chat — exposes the agent
-```
 
-Full integration code:
-
-```python
-# app/services/query_agent.py
-from finance_query_agent import (
-    create_agent, SchemaMapping, TableMapping, JoinDef, ColumnRef, AmountConvention,
-)
-from app.core.config import settings
-
-schema = SchemaMapping(
-    transactions=TableMapping(
-        table="account_movements",
-        columns={
-            "date": "issued_at",
-            "amount": "amount",
-            "description": "description",
-            "user_id": ColumnRef("accounts", "user_id"),
-            "currency": ColumnRef("accounts", "currency"),
-            "account_id": "account_id",
-            "balance": "balance",
-        },
-        joins=[
-            JoinDef(table="accounts", on="account_movements.account_id = accounts.id", type="inner"),
-            JoinDef(table="tags", on="account_movements.category_id = tags.id", type="left"),
-        ],
-        amount_convention=AmountConvention(
-            direction_column="movement_direction",
-            expense_value="debit",
-            income_value="credit",
-        ),
-    ),
-    categories=TableMapping(
-        table="tags",
-        columns={"id": "id", "name": "name"},
-        user_scoped=False,
-    ),
-    accounts=TableMapping(
-        table="accounts",
-        columns={"id": "id", "name": "alias", "user_id": "user_id"},
-    ),
-    secondary_transactions=TableMapping(
-        table="credit_card_movements",
-        columns={
-            "date": "issued_at",
-            "amount": "amount",
-            "description": "description",
-            "user_id": ColumnRef("credit_cards", "user_id"),
-            "currency": "currency",
-            "account_id": "credit_card_id",
-        },
-        joins=[
-            JoinDef(table="credit_cards", on="credit_card_movements.credit_card_id = credit_cards.id", type="inner"),
-            JoinDef(table="tags", on="credit_card_movements.category_id = tags.id", type="left"),
-        ],
-        amount_convention=AmountConvention(
-            direction_column="movement_direction",
-            expense_value="debit",
-            income_value="credit",
-        ),
-    ),
-)
-
-query_agent = create_agent(
-    db_url=settings.asyncpg_database_url,
-    schema=schema,
-    model="openai:gpt-4o",
-)
-```
+**Backend integration** (the backend signs requests with SigV4 and forwards them to the Function URL):
 
 ```python
 # app/api/chat_endpoints.py
-from fastapi import APIRouter, Depends
-from app.services.query_agent import query_agent
-from app.api.dependencies import get_current_user
-
-router = APIRouter()
+import boto3
+from botocore.auth import SigV4Auth
+from botocore.awsrequest import AWSRequest
 
 @router.post("/api/chat")
 async def chat(question: str, user=Depends(get_current_user)):
-    result = await query_agent.run(question, user_id=str(user.id))
-    return result
+    # Backend signs the request and forwards to the Function URL
+    payload = {
+        "user_id": str(user.id),
+        "session_id": session_id,
+        "question": question,
+    }
+    # ... SigV4 signed HTTP POST to Function URL ...
+    return response.json()
 ```
 
 ## 16. Schema Mapping Versioning
 
-The `SchemaMapping` model is part of the SDK's public API. Changes to it follow semver:
+The `SchemaMapping` model is part of the service's configuration API. Changes to it follow semver:
 
 - **Patch:** Bug fixes, no mapping changes.
 - **Minor:** New optional fields on `SchemaMapping`/`TableMapping` (backward compatible). New optional column keys. New tools that activate when optional columns are mapped.
 - **Major:** New required fields, renamed fields, removed fields, changed semantics of existing fields.
 
-## 17. Open Questions
+## 17. Design Decisions & Clarifications
 
-1. **Currency handling:** The SDK returns per-currency breakdowns. Should the LLM present all currencies, or should the system prompt instruct it to highlight the "primary" currency? If so, how is primary currency determined?
+### 17.1 `JoinDef.on` Format
+
+The `on` field accepts a single equality condition in the form `table.column = table.column`. Compound join conditions (AND) are not supported in v1. If a join requires multiple conditions, use a single equality on the primary key and filter additional conditions in the WHERE clause.
+
+### 17.2 Sign-Based `AmountConvention` Aggregation
+
+When `sign_means_expense="negative"`, expense amounts are stored as negative values (e.g., -50.00). Spending tools use `SUM(ABS(amount))` to produce positive totals. When `sign_means_expense="positive"`, expense amounts are positive, and spending tools use `SUM(amount)` directly. In both cases, filtering for expenses uses the sign: `WHERE amount < 0` (negative convention) or `WHERE amount > 0` (positive convention). Income filtering uses the opposite sign.
+
+### 17.3 UNION ALL with Independent `AmountConvention`
+
+When primary and secondary transaction tables have different `AmountConvention` settings, the query builder applies each table's convention independently within its side of the `UNION ALL`. Each SELECT applies the correct filtering and aggregation for its own convention before the UNION.
+
+### 17.4 Single Connection Model
+
+The service uses a single `asyncpg.connect()` per Lambda invocation instead of a connection pool. This matches Lambda's execution model (one concurrent request per instance). The connection is created at request start and closed in a `finally` block. DB credentials are resolved from Secrets Manager on cold start and cached via `lru_cache`.
+
+### 17.5 Description as Merchant Identity
+
+In v1, merchant grouping uses the raw `description` column value. "NETFLIX.COM 03/01" and "Netflix Inc" are treated as separate merchants. Merchant normalization (fuzzy matching, alias resolution) is explicitly out of scope for v1. Consumers can pre-normalize descriptions in their database if needed.
+
+### 17.6 Recurring Expense Normalization
+
+The `get_recurring_expenses` tool normalizes descriptions with `LOWER(TRIM(description))` only. This is intentional for v1 — it catches exact duplicates with case/whitespace variance but does not attempt fuzzy matching. Same limitation as 17.5.
+
+### 17.7 `on_tool_call` Hook Semantics
+
+The `on_tool_call` hook fires once per final tool execution. When the fallback SQL tool retries (via `ModelRetry`), the hook fires only on the final attempt (whether successful or the last failed attempt). Intermediate retry attempts do not trigger the hook.
+
+### 17.8 UNION ALL Sort Order
+
+When queries combine primary and secondary transactions via `UNION ALL`, results are sorted by the transaction date column descending (`ORDER BY date DESC`) by default. Aggregation tools that GROUP BY override this with their own ordering (e.g., `ORDER BY total_amount DESC`).
+
+### 17.9 `account_id` Type Coercion
+
+The `account_id` parameter on tool inputs is typed as `str`. The service passes it to asyncpg as-is. asyncpg handles coercion to the database column type (UUID, integer, text) automatically via its type codec system. No explicit casting is needed.
+
+## 18. Open Questions
+
+1. **Currency handling:** The service returns per-currency breakdowns. Should the LLM present all currencies, or should the system prompt instruct it to highlight the "primary" currency? If so, how is primary currency determined?
