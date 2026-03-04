@@ -43,39 +43,33 @@ echo
 
 # Collect DB credentials as JSON
 DB_CREDENTIALS=$(cat <<CRED
-{"host":"${POSTGRES_HOST}","port":5432,"dbname":"${POSTGRES_DB:-personal_incomes}","user":"finance_agent_ro","password":"${DB_PASSWORD}"}
+{"host":"${POSTGRES_HOST}","port":5432,"dbname":"${POSTGRES_DB:-personal_incomes}","username":"finance_agent_ro","password":"${DB_PASSWORD}"}
 CRED
 )
 
 echo
-echo "Creating Secrets Manager secrets..."
+echo "Populating Secrets Manager secrets..."
+echo "(Secrets must already exist — created by 'terraform apply')"
+echo
 
-create_secret() {
+populate_secret() {
   local name="$1"
   local value="$2"
 
-  if aws secretsmanager describe-secret --secret-id "$name" --region "$REGION" &>/dev/null; then
-    echo "  Updating existing secret: $name"
-    aws secretsmanager put-secret-value \
-      --secret-id "$name" \
-      --secret-string "$value" \
-      --region "$REGION" > /dev/null
-  else
-    echo "  Creating secret: $name"
-    aws secretsmanager create-secret \
-      --name "$name" \
-      --secret-string "$value" \
-      --region "$REGION" > /dev/null
-  fi
+  echo "  Updating: $name"
+  aws secretsmanager put-secret-value \
+    --secret-id "$name" \
+    --secret-string "$value" \
+    --region "$REGION" > /dev/null
 }
 
-create_secret "$PROJECT/db-credentials" "$DB_CREDENTIALS"
-create_secret "$PROJECT/encryption-key" "$ENCRYPTION_KEY"
-create_secret "$PROJECT/llm-api-key" "$OPENAI_API_KEY"
-create_secret "$PROJECT/logfire-token" "${LOGFIRE_TOKEN:-}"
+populate_secret "$PROJECT/db-credentials" "$DB_CREDENTIALS"
+populate_secret "$PROJECT/encryption-key" "$ENCRYPTION_KEY"
+populate_secret "$PROJECT/llm-api-key" "$OPENAI_API_KEY"
+populate_secret "$PROJECT/logfire-token" "${LOGFIRE_TOKEN:-}"
 
 echo
-echo "=== Secrets created ==="
+echo "=== Secrets populated ==="
 echo
 echo "--- Next Steps ---"
 echo

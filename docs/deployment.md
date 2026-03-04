@@ -2,60 +2,45 @@
 
 ## Prerequisites
 
-- AWS account with permissions for Lambda, DynamoDB, ECR, VPC, Secrets Manager
-- Terraform >= 1.0
+- AWS account with permissions for Lambda, DynamoDB, ECR, Secrets Manager
+- Terraform >= 1.5
 - Docker
-- An existing VPC with private subnets and RDS instance
+- A publicly accessible RDS PostgreSQL instance (no VPC required)
 
-## Terraform Module
+## Setup Flow
 
-The `terraform/` directory is a self-contained module. Consume it from your infrastructure repo:
+1. Configure GitHub secrets/variables (see below)
+2. Merge to `main` -- deploy pipeline creates all AWS resources (ECR, Lambda, DynamoDB, Function URL, Secrets Manager shells)
+3. Run `scripts/bootstrap.sh` to populate secret values
+4. Create the read-only PostgreSQL user (SQL printed by bootstrap)
 
-```hcl
-module "finance_agent" {
-  source = "../finance-query-agent/terraform"
+## GitHub Configuration
 
-  vpc_id                    = module.vpc.vpc_id
-  subnet_ids                = module.vpc.private_subnets
-  rds_security_group_id     = aws_security_group.rds.id
-  rds_endpoint              = aws_db_instance.main.endpoint
-  db_credentials_secret_arn = aws_secretsmanager_secret.agent_readonly_db.arn
-  encryption_key_secret_arn = aws_secretsmanager_secret.fernet_key.arn
-  llm_api_key_secret_arn    = aws_secretsmanager_secret.openai_key.arn
-  allowed_origins           = ["https://your-frontend-domain.com"]
-  schema_config_json        = file("${path.module}/agent_schema.json")
-  ecr_image_uri             = "${module.finance_agent.ecr_repository_url}:latest"
-}
-```
+**Secrets:**
+- `AWS_ACCESS_KEY_ID`
+- `AWS_SECRET_ACCESS_KEY`
+- `SCHEMA_CONFIG_JSON` -- your SchemaMapping JSON
 
-## Build & Deploy
+**Variables:**
+- `ALLOWED_ORIGINS` -- HCL list, e.g. `["https://d1234.cloudfront.net"]`
 
-```bash
-# 1. Build Docker image
-docker build -t finance-query-agent .
+## Terraform
 
-# 2. Tag and push to ECR
-aws ecr get-login-password | docker login --username AWS --password-stdin <account>.dkr.ecr.<region>.amazonaws.com
-docker tag finance-query-agent:latest <ecr-repo-url>:latest
-docker push <ecr-repo-url>:latest
+The `terraform/` directory is self-contained. The deploy pipeline runs `terraform apply` automatically on merge to `main`. Secrets Manager secrets are created by Terraform (empty shells), then populated by `scripts/bootstrap.sh`.
 
-# 3. Apply Terraform
-cd terraform && terraform apply
+Required Terraform variables (passed via `TF_VAR_*` in CI):
+- `schema_config_json` -- SchemaMapping JSON
+- `allowed_origins` -- list of frontend origins
+- `ecr_image_uri` -- set dynamically by CI
 
-# 4. Update Lambda to use new image
-aws lambda update-function-code \
-  --function-name finance-query-agent \
-  --image-uri <ecr-repo-url>:latest
-```
+## Secrets
 
-## Secrets Setup
+Four secrets are managed in Secrets Manager (created by Terraform, populated by bootstrap):
 
-Create these in Secrets Manager before deploying:
-
-1. **DB credentials** — JSON secret with `username`, `password`, `host`, `port`, `dbname` for the read-only PostgreSQL role
-2. **Encryption key** — Fernet key for DynamoDB field encryption (generate with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`)
-3. **LLM API key** — OpenAI API key as `OPENAI_API_KEY`
-4. **Logfire token** (optional) — for observability
+1. **DB credentials** -- JSON with `username`, `password`, `host`, `port`, `dbname` for the read-only PostgreSQL role
+2. **Encryption key** -- Fernet key for DynamoDB field encryption
+3. **LLM API key** -- OpenAI API key
+4. **Logfire token** (optional) -- for observability
 
 ## Backend Integration
 

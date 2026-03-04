@@ -12,6 +12,7 @@ variable "llm_model" {
 # Schema
 variable "schema_config_json" {
   type        = string
+  sensitive   = true
   description = "SchemaMapping JSON configuration"
 }
 

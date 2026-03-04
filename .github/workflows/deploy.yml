@@ -116,13 +116,3 @@ jobs:
           TF_VAR_allowed_origins: ${{ vars.ALLOWED_ORIGINS }}
           TF_VAR_ecr_image_uri: "${{ steps.ecr-login.outputs.registry }}/finance-query-agent:${{ steps.version.outputs.sha }}"
 
-      - name: Update Lambda function code
-        env:
-          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
-          IMAGE_TAG: ${{ steps.version.outputs.sha }}
-        run: |
-          aws lambda update-function-code \
-            --function-name finance-query-agent \
-            --image-uri "$ECR_REGISTRY/finance-query-agent:$IMAGE_TAG"
-          aws lambda wait function-updated \
-            --function-name finance-query-agent
