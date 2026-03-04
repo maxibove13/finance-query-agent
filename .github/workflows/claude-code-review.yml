@@ -1,0 +1,145 @@
+name: Claude Code Review
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  claude-review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: read
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch previous review
+        id: previous-review
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          COMMENTS=$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" \
+            --jq '[.[] | select(.body | contains("<!-- claude-code-review -->")) | {id: .id, body: .body}]')
+
+          COMMENT_COUNT=$(echo "$COMMENTS" | jq 'length')
+
+          if [ "$COMMENT_COUNT" -gt 0 ]; then
+            LAST_COMMENT_ID=$(echo "$COMMENTS" | jq -r '.[-1].id')
+            echo "$COMMENTS" | jq -r '.[-1].body' > /tmp/previous_review.txt
+            echo "previous_comment_id=$LAST_COMMENT_ID" >> "$GITHUB_OUTPUT"
+            echo "has_previous_review=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_previous_review=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          # Save all PR comments for context
+          gh api \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" \
+            --jq '[.[] | {user: .user.login, body: (.body | .[0:500])}]' > /tmp/pr_comments.json
+
+      - name: Run Claude Code Review
+        id: claude-review
+        uses: anthropics/claude-code-action@beta
+        env:
+          PREVIOUS_COMMENT_ID: ${{ steps.previous-review.outputs.previous_comment_id }}
+          HAS_PREVIOUS_REVIEW: ${{ steps.previous-review.outputs.has_previous_review }}
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          allowed_tools: "Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr comment:*),Bash(gh pr list:*),Bash(gh api:*),Read,Glob,Grep"
+          direct_prompt: |
+            You are a code reviewer for PR #${{ github.event.pull_request.number }} in ${{ github.repository }}.
+
+            Review the PR diff by running: gh pr diff ${{ github.event.pull_request.number }}
+            Also read the PR description: gh pr view ${{ github.event.pull_request.number }}
+            Read /tmp/pr_comments.json to see existing PR comments -- take them into account.
+            Use the repository's CLAUDE.md for guidance on style and conventions.
+
+            SCOPE RESTRICTION: Only review code that was ADDED or MODIFIED in this PR's diff. Do NOT flag pre-existing patterns or issues in unchanged code.
+
+            Review for TWO categories:
+
+            **CRITICAL ISSUES** (blocks merge):
+            - Security vulnerabilities (injection, auth bypass, secrets in code)
+            - Bugs that will cause runtime errors or data corruption
+            - Breaking changes to public APIs without migration path
+            - Missing error handling that will crash production
+            - SQL injection or parameterization issues (critical for this project)
+
+            **CLEAN CODE** (should fix, doesn't block):
+            - Dead code, unused imports, redundant logic
+            - Naming that obscures intent
+            - Overly complex code that has a simpler equivalent
+            - Missing parameterization in SQL queries
+            - Violations of patterns established in CLAUDE.md
+
+            Do NOT flag: style preferences covered by ruff/mypy, missing docs for obvious code, test coverage opinions.
+
+            COMPLETENESS: Report ALL issues in a SINGLE review. If a pattern issue exists, list ALL affected locations.
+
+            ${{ steps.previous-review.outputs.has_previous_review == 'true' && format('IMPORTANT: There is a previous review on this PR. Read /tmp/previous_review.txt to see it. Consider what issues have been addressed and what remains. After posting your new review, delete the old comment using: gh api -X DELETE "/repos/{0}/issues/comments/{1}"', github.repository, steps.previous-review.outputs.previous_comment_id) || '' }}
+
+            Post your review using `gh pr comment`. Include `<!-- claude-code-review -->` at the END of your comment.
+
+            SCORING REQUIREMENT — end your comment with EXACTLY this format:
+            ```
+            <!-- SCORE:X -->
+            <!-- CRITICAL:Y -->
+            ```
+            Where:
+            - X is 0-10 (10 = excellent, 0 = critical failures)
+            - Y is "true" or "false"
+
+            Scoring:
+            - 9-10: Minor or no issues
+            - 7-8: Clean code suggestions but nothing blocking
+            - 5-6: Notable issues that should be addressed
+            - 3-4: Significant problems, fix before merge
+            - 0-2: Critical security/data/breaking issues
+
+            CRITICAL:true only for: security vulnerabilities, data loss risks, breaking changes without migration, severe performance issues causing outages.
+
+      - name: Enforce review threshold
+        env:
+          GH_TOKEN: ${{ github.token }}
+          THRESHOLD: 7
+        run: |
+          COMMENT_BODY=$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" \
+            --jq '[.[] | select(.body | contains("<!-- claude-code-review -->"))] | .[-1].body // ""')
+
+          if [ -z "$COMMENT_BODY" ]; then
+            echo "::warning::Could not find Claude review comment. Passing by default."
+            exit 0
+          fi
+
+          SCORE=$(echo "$COMMENT_BODY" | grep -oP '<!-- SCORE:\K[0-9]+' | head -1 || echo "")
+          CRITICAL=$(echo "$COMMENT_BODY" | grep -oP '<!-- CRITICAL:\K(true|false)' | head -1 || echo "")
+
+          echo "Score: $SCORE/10"
+          echo "Critical: $CRITICAL"
+
+          if [ -z "$SCORE" ]; then
+            echo "::warning::Could not extract score. Passing by default."
+            exit 0
+          fi
+
+          if [ "$CRITICAL" = "true" ]; then
+            echo "::error::Critical issues found. Score: $SCORE/10"
+            exit 1
+          fi
+
+          if [ "$SCORE" -lt "$THRESHOLD" ]; then
+            echo "::error::Review score ($SCORE/10) below threshold ($THRESHOLD/10)"
+            exit 1
+          fi
+
+          echo "::notice::Review passed with score $SCORE/10 (threshold: $THRESHOLD/10)"
