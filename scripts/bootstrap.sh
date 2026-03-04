@@ -41,10 +41,12 @@ echo
 read -rsp "Enter password for read-only PostgreSQL user (finance_agent_ro): " DB_PASSWORD
 echo
 
-# Collect DB credentials as JSON
-DB_CREDENTIALS=$(cat <<CRED
-{"host":"${POSTGRES_HOST}","port":5432,"dbname":"${POSTGRES_DB:-personal_incomes}","username":"finance_agent_ro","password":"${DB_PASSWORD}"}
-CRED
+# Collect DB credentials as JSON (jq ensures proper escaping)
+DB_CREDENTIALS=$(jq -n \
+  --arg host "$POSTGRES_HOST" \
+  --arg dbname "${POSTGRES_DB:-personal_incomes}" \
+  --arg password "$DB_PASSWORD" \
+  '{host: $host, port: 5432, dbname: $dbname, username: "finance_agent_ro", password: $password}'
 )
 
 echo
@@ -66,7 +68,12 @@ populate_secret() {
 populate_secret "$PROJECT/db-credentials" "$DB_CREDENTIALS"
 populate_secret "$PROJECT/encryption-key" "$ENCRYPTION_KEY"
 populate_secret "$PROJECT/llm-api-key" "$OPENAI_API_KEY"
-populate_secret "$PROJECT/logfire-token" "${LOGFIRE_TOKEN:-}"
+
+if [ -n "${LOGFIRE_TOKEN:-}" ]; then
+  populate_secret "$PROJECT/logfire-token" "$LOGFIRE_TOKEN"
+else
+  echo "  Skipping: $PROJECT/logfire-token (LOGFIRE_TOKEN not set)"
+fi
 
 echo
 echo "=== Secrets populated ==="

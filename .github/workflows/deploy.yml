@@ -84,6 +84,13 @@ jobs:
         id: ecr-login
         uses: aws-actions/amazon-ecr-login@v2
 
+      - name: Ensure ECR repository exists
+        run: |
+          aws ecr describe-repositories --repository-names finance-query-agent 2>/dev/null || \
+            aws ecr create-repository --repository-name finance-query-agent \
+              --image-scanning-configuration scanOnPush=true \
+              --image-tag-mutability MUTABLE
+
       - name: Build and push Docker image
         env:
           ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
