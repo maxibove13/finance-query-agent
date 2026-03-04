@@ -83,6 +83,28 @@ jobs:
             echo "No origin/main baseline yet — skipping diff-cover"
           fi
 
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build .
+
+  terraform-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform init & validate
+        working-directory: terraform
+        run: |
+          terraform init -backend=false
+          terraform validate
+
   claude-review:
     runs-on: ubuntu-latest
     permissions:

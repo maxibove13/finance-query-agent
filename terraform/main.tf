@@ -33,12 +33,6 @@ resource "aws_iam_role_policy_attachment" "lambda_basic" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 }
 
-# VPC access for RDS
-resource "aws_iam_role_policy_attachment" "lambda_vpc" {
-  role       = aws_iam_role.lambda.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
-}
-
 # DynamoDB + Secrets Manager access
 resource "aws_iam_role_policy" "lambda_app" {
   name = "${var.project_name}-app"
@@ -64,42 +58,32 @@ resource "aws_iam_role_policy" "lambda_app" {
         Action = [
           "secretsmanager:GetSecretValue",
         ]
-        Resource = compact([
-          var.db_credentials_secret_arn,
-          var.encryption_key_secret_arn,
-          var.llm_api_key_secret_arn,
-          var.logfire_token_secret_arn,
-        ])
+        Resource = [
+          aws_secretsmanager_secret.db_credentials.arn,
+          aws_secretsmanager_secret.encryption_key.arn,
+          aws_secretsmanager_secret.llm_api_key.arn,
+          aws_secretsmanager_secret.logfire_token.arn,
+        ]
       },
     ]
   })
 }
 
-# Security Group for Lambda
-resource "aws_security_group" "lambda" {
-  name_prefix = "${var.project_name}-lambda-"
-  vpc_id      = var.vpc_id
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  tags = {
-    Name = "${var.project_name}-lambda"
-  }
+# Secrets Manager
+resource "aws_secretsmanager_secret" "db_credentials" {
+  name = "${var.project_name}/db-credentials"
 }
 
-# Allow Lambda to reach RDS
-resource "aws_security_group_rule" "rds_ingress_from_lambda" {
-  type                     = "ingress"
-  from_port                = 5432
-  to_port                  = 5432
-  protocol                 = "tcp"
-  source_security_group_id = aws_security_group.lambda.id
-  security_group_id        = var.rds_security_group_id
+resource "aws_secretsmanager_secret" "encryption_key" {
+  name = "${var.project_name}/encryption-key"
+}
+
+resource "aws_secretsmanager_secret" "llm_api_key" {
+  name = "${var.project_name}/llm-api-key"
+}
+
+resource "aws_secretsmanager_secret" "logfire_token" {
+  name = "${var.project_name}/logfire-token"
 }
 
 # Lambda Function
@@ -111,21 +95,16 @@ resource "aws_lambda_function" "agent" {
   memory_size   = var.memory_size
   timeout       = var.timeout
 
-  vpc_config {
-    subnet_ids         = var.subnet_ids
-    security_group_ids = [aws_security_group.lambda.id]
-  }
-
   environment {
     variables = {
-      DYNAMODB_TABLE              = aws_dynamodb_table.conversations.name
-      DYNAMODB_REGION             = data.aws_region.current.name
-      LLM_MODEL                   = var.llm_model
-      SCHEMA_CONFIG_JSON          = var.schema_config_json
-      DB_CREDENTIALS_SECRET_ARN   = var.db_credentials_secret_arn
-      ENCRYPTION_KEY_SECRET_ARN   = var.encryption_key_secret_arn
-      LLM_API_KEY_SECRET_ARN      = var.llm_api_key_secret_arn
-      LOGFIRE_TOKEN_SECRET_ARN    = var.logfire_token_secret_arn
+      DYNAMODB_TABLE            = aws_dynamodb_table.conversations.name
+      DYNAMODB_REGION           = data.aws_region.current.name
+      LLM_MODEL                 = var.llm_model
+      SCHEMA_CONFIG_JSON        = var.schema_config_json
+      DB_CREDENTIALS_SECRET_ARN = aws_secretsmanager_secret.db_credentials.arn
+      ENCRYPTION_KEY_SECRET_ARN = aws_secretsmanager_secret.encryption_key.arn
+      LLM_API_KEY_SECRET_ARN    = aws_secretsmanager_secret.llm_api_key.arn
+      LOGFIRE_TOKEN_SECRET_ARN  = aws_secretsmanager_secret.logfire_token.arn
     }
   }
 
