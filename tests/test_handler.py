@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from contextlib import ExitStack
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from pydantic_ai.exceptions import UsageLimitExceeded
 
 import finance_query_agent.handler as handler_module
 from finance_query_agent.handler import _process_request, handler
@@ -79,6 +81,9 @@ def _build_mocks() -> dict:
     settings.dynamodb_table = "t"
     settings.dynamodb_region = "us-east-1"
     settings.llm_model = "test:m"
+    settings.agent_request_limit = 7
+    settings.agent_per_request_timeout = 12.0
+    settings.agent_run_timeout = 25.0
 
     targets = {
         "finance_query_agent.observability.initialize": MagicMock(),
@@ -182,3 +187,69 @@ class TestProcessRequest:
 
         deps = mocks["agent"].run.call_args.kwargs["deps"]
         assert deps.user_id == "u1"
+
+    @pytest.mark.asyncio()
+    async def test_returns_200_on_usage_limit_exceeded(self, mocks: dict) -> None:
+        mocks["agent"].run = AsyncMock(side_effect=UsageLimitExceeded("request_limit of 7 exceeded"))
+
+        with ExitStack() as stack:
+            _apply(stack, mocks["targets"])
+            resp = await _process_request(_BODY)
+
+        assert resp.unresolved is True
+        assert "time limit" in resp.answer
+        assert resp.original_question == "test?"
+
+    @pytest.mark.asyncio()
+    async def test_returns_200_on_timeout(self, mocks: dict) -> None:
+        mocks["settings"].agent_run_timeout = 0.01
+
+        async def _hang(*args, **kwargs):
+            await asyncio.sleep(999)
+
+        mocks["agent"].run = AsyncMock(side_effect=_hang)
+
+        with ExitStack() as stack:
+            _apply(stack, mocks["targets"])
+            resp = await _process_request(_BODY)
+
+        assert resp.unresolved is True
+        assert "time limit" in resp.answer
+
+    @pytest.mark.asyncio()
+    async def test_closes_connection_on_timeout(self, mocks: dict) -> None:
+        mocks["agent"].run = AsyncMock(side_effect=UsageLimitExceeded("exceeded"))
+
+        with ExitStack() as stack:
+            _apply(stack, mocks["targets"])
+            await _process_request(_BODY)
+
+        mocks["conn"].close.assert_awaited_once()
+
+    @pytest.mark.asyncio()
+    async def test_does_not_save_history_on_timeout(self, mocks: dict) -> None:
+        mocks["agent"].run = AsyncMock(side_effect=UsageLimitExceeded("exceeded"))
+
+        with ExitStack() as stack:
+            _apply(stack, mocks["targets"])
+            await _process_request(_BODY)
+
+        mocks["memory"].save_history.assert_not_awaited()
+
+    @pytest.mark.asyncio()
+    async def test_passes_usage_limits_to_agent_run(self, mocks: dict) -> None:
+        with ExitStack() as stack:
+            _apply(stack, mocks["targets"])
+            await _process_request(_BODY)
+
+        kwargs = mocks["agent"].run.call_args.kwargs
+        assert kwargs["usage_limits"].request_limit == 7
+
+    @pytest.mark.asyncio()
+    async def test_passes_model_settings_to_agent_run(self, mocks: dict) -> None:
+        with ExitStack() as stack:
+            _apply(stack, mocks["targets"])
+            await _process_request(_BODY)
+
+        kwargs = mocks["agent"].run.call_args.kwargs
+        assert kwargs["model_settings"]["timeout"] == 12.0

@@ -25,6 +25,11 @@ class Settings(BaseSettings):
     logfire_token: str | None = None
     aws_lambda_function_name: str | None = None  # auto-set by Lambda
 
+    # Agent execution limits (30s caller-side budget)
+    agent_request_limit: int = 7
+    agent_per_request_timeout: float = 12.0
+    agent_run_timeout: float = 25.0
+
     # Secrets Manager ARNs (set via Terraform env vars in Lambda)
     db_credentials_secret_arn: str | None = None
     encryption_key_secret_arn: str | None = None
