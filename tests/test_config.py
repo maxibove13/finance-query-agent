@@ -24,6 +24,9 @@ class TestLoadFromEnv:
         assert s.dynamodb_region == "us-east-1"
         assert s.database_url is None
         assert s.db_credentials_secret_arn is None
+        assert s.agent_request_limit == 7
+        assert s.agent_per_request_timeout == 12.0
+        assert s.agent_run_timeout == 25.0
 
 
 class TestLoadSchema:

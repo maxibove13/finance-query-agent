@@ -86,10 +86,42 @@ async def _process_request(body: dict[str, Any]) -> AgentResponse:
         history = await memory.load_history(user_id, session_id)
 
         # Run agent
+        from pydantic_ai import UsageLimits
+        from pydantic_ai.exceptions import UsageLimitExceeded
+        from pydantic_ai.settings import ModelSettings
+
         qb = QueryBuilder(schema)
         deps = AgentDeps(connection=conn, query_builder=qb, schema=schema, user_id=user_id)
         agent = get_agent(settings.llm_model)
-        result = await agent.run(question, deps=deps, message_history=history)
+
+        usage_limits = UsageLimits(request_limit=settings.agent_request_limit)
+        model_settings = ModelSettings(timeout=settings.agent_per_request_timeout)
+
+        try:
+            result = await asyncio.wait_for(
+                agent.run(
+                    question,
+                    deps=deps,
+                    message_history=history,
+                    usage_limits=usage_limits,
+                    model_settings=model_settings,
+                ),
+                timeout=settings.agent_run_timeout,
+            )
+        except (TimeoutError, UsageLimitExceeded) as exc:
+            logger.warning("Agent execution capped: %s", exc)
+            return AgentResponse(
+                answer=(
+                    "I wasn't able to fully process your question within the time limit."
+                    " Please try rephrasing it or breaking it into simpler parts."
+                ),
+                tool_calls=deps.tool_calls,
+                fallback_used=deps.fallback_used,
+                fallback_sql=deps.fallback_sql,
+                unresolved=True,
+                original_question=question,
+                token_usage=TokenUsage(input_tokens=0, output_tokens=0),
+            )
 
         # Store updated conversation
         await memory.save_history(user_id, session_id, result.all_messages())
