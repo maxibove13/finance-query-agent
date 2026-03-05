@@ -39,11 +39,6 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
 async def _process_request(body: dict[str, Any]) -> AgentResponse:
     """Orchestrate agent execution: connect, load history, run, save history."""
     global _initialized  # noqa: PLW0603
-    if not _initialized:
-        from finance_query_agent.observability import initialize
-
-        initialize()
-        _initialized = True
 
     from finance_query_agent.agent import get_agent
     from finance_query_agent.config import get_settings, load_schema_json
@@ -61,6 +56,12 @@ async def _process_request(body: dict[str, Any]) -> AgentResponse:
     question = body["question"]
 
     settings = get_settings()
+
+    if not _initialized:
+        from finance_query_agent.observability import initialize
+
+        initialize()
+        _initialized = True
     encryptor = FieldEncryptor(settings.encryption_key)
     memory = ConversationMemory(settings.dynamodb_table, settings.dynamodb_region, encryptor)
     assert settings.database_url is not None, "database_url must be set"
