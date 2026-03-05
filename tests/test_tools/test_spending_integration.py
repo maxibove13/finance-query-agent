@@ -89,7 +89,7 @@ class TestGetMonthlyTotalsIntegration:
     async def test_returns_monthly_data(self, db_connection, query_builder, sample_schema_mapping):
         ctx = _make_ctx(db_connection, query_builder, sample_schema_mapping, SEED_USER_1)
 
-        result = await get_monthly_totals(ctx, date(2025, 10, 1), date(2025, 12, 31))
+        result = await get_monthly_totals(ctx, start_month=10, start_year=2025, end_month=12, end_year=2025)
 
         assert len(result) > 0
         assert all(isinstance(r, MonthlyTotal) for r in result)
@@ -103,7 +103,7 @@ class TestGetMonthlyTotalsIntegration:
     async def test_includes_multiple_months(self, db_connection, query_builder, sample_schema_mapping):
         ctx = _make_ctx(db_connection, query_builder, sample_schema_mapping, SEED_USER_1)
 
-        result = await get_monthly_totals(ctx, date(2025, 10, 1), date(2026, 2, 28))
+        result = await get_monthly_totals(ctx, start_month=10, start_year=2025, end_month=2, end_year=2026)
 
         usd_months = {(r.year, r.month) for r in result if r.currency == "USD"}
         assert (2025, 10) in usd_months
