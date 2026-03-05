@@ -1,14 +1,8 @@
 data "aws_region" "current" {}
 
-# ECR Repository
-resource "aws_ecr_repository" "agent" {
-  name                 = var.project_name
-  image_tag_mutability = "MUTABLE"
-  force_delete         = false
-
-  image_scanning_configuration {
-    scan_on_push = true
-  }
+# ECR Repository (created by CI workflow before Terraform runs)
+data "aws_ecr_repository" "agent" {
+  name = var.project_name
 }
 
 # IAM Role for Lambda

@@ -7,7 +7,7 @@ output "dynamodb_table_name" {
 }
 
 output "ecr_repository_url" {
-  value = aws_ecr_repository.agent.repository_url
+  value = data.aws_ecr_repository.agent.repository_url
 }
 
 output "lambda_function_name" {
