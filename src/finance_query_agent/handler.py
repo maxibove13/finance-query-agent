@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -19,41 +18,19 @@ _initialized: bool = False
 
 
 def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
-    """Lambda handler. Receives HTTP request, returns HTTP response."""
+    """Lambda handler. Invoked directly via boto3 lambda.invoke()."""
     try:
-        body = json.loads(event.get("body", "{}"))
-        result = asyncio.run(_process_request(body))
-        return {
-            "statusCode": 200,
-            "headers": {"Content-Type": "application/json"},
-            "body": result.model_dump_json(),
-        }
+        result = asyncio.run(_process_request(event))
+        return result.model_dump()
     except KeyError as e:
         logger.warning("Missing required field: %s", e)
-        return {
-            "statusCode": 400,
-            "headers": {"Content-Type": "application/json"},
-            "body": json.dumps({"error": f"Missing required field: {e}"}),
-        }
+        return {"error": f"Missing required field: {e}"}
     except SchemaValidationError as e:
         logger.error("Schema config does not match database: %s", e)
-        return {
-            "statusCode": 503,
-            "headers": {"Content-Type": "application/json"},
-            "body": json.dumps(
-                {
-                    "error": "schema_mismatch",
-                    "message": str(e),
-                }
-            ),
-        }
+        return {"error": "schema_mismatch", "message": str(e)}
     except Exception as e:
         logger.exception("Agent request failed")
-        return {
-            "statusCode": 500,
-            "headers": {"Content-Type": "application/json"},
-            "body": json.dumps({"error": sanitize_error(e)}),
-        }
+        return {"error": sanitize_error(e)}
 
 
 async def _process_request(body: dict[str, Any]) -> AgentResponse:
