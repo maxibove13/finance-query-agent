@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import calendar
 import time
 from datetime import date
 
@@ -65,11 +66,20 @@ async def get_spending_by_category(
 
 async def get_monthly_totals(
     ctx: RunContext[AgentDeps],
-    period_start: date,
-    period_end: date,
+    start_month: int,
+    start_year: int,
+    end_month: int,
+    end_year: int,
     account_id: str | None = None,
 ) -> list[MonthlyTotal]:
-    """Get aggregated expense totals per month. Results grouped by currency."""
+    """Get aggregated expense totals per month.
+
+    Specify year/month instead of exact dates; the tool computes the
+    correct date range. Results grouped by currency.
+    """
+    period_start = date(start_year, start_month, 1)
+    period_end = date(end_year, end_month, calendar.monthrange(end_year, end_month)[1])
+
     deps = ctx.deps
     query = deps.query_builder.build_monthly_totals(
         user_id=deps.user_id,
@@ -96,8 +106,10 @@ async def get_monthly_totals(
         ToolCallRecord(
             tool_name="get_monthly_totals",
             parameters={
-                "period_start": str(period_start),
-                "period_end": str(period_end),
+                "start_month": start_month,
+                "start_year": start_year,
+                "end_month": end_month,
+                "end_year": end_year,
                 "account_id": account_id,
             },
             execution_time_ms=elapsed_ms,
