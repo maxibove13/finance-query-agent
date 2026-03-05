@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from datetime import date
 from typing import Literal
@@ -15,6 +16,8 @@ from finance_query_agent.schemas.tool_results import (
     TransactionSearchResult,
 )
 from finance_query_agent.tools import AgentDeps
+
+logger = logging.getLogger(__name__)
 
 
 async def search_transactions(
@@ -45,8 +48,16 @@ async def search_transactions(
     )
 
     start = time.monotonic()
-    rows = await deps.connection.fetch(data_query.sql, *data_query.params)
-    count_row = await deps.connection.fetchrow(count_query.sql, *count_query.params)
+    try:
+        rows = await deps.connection.fetch(data_query.sql, *data_query.params)
+    except Exception:
+        logger.error("Tool '%s' query failed | sql=%s", "search_transactions", data_query.sql)
+        raise
+    try:
+        count_row = await deps.connection.fetchrow(count_query.sql, *count_query.params)
+    except Exception:
+        logger.error("Tool '%s' count query failed | sql=%s", "search_transactions", count_query.sql)
+        raise
     elapsed_ms = int((time.monotonic() - start) * 1000)
 
     total_count = count_row["total_count"] if count_row else 0
@@ -107,7 +118,11 @@ async def get_top_merchants(
     )
 
     start = time.monotonic()
-    rows = await deps.connection.fetch(query.sql, *query.params)
+    try:
+        rows = await deps.connection.fetch(query.sql, *query.params)
+    except Exception:
+        logger.error("Tool '%s' query failed | sql=%s", "get_top_merchants", query.sql)
+        raise
     elapsed_ms = int((time.monotonic() - start) * 1000)
 
     results = [

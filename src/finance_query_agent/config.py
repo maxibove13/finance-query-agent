@@ -78,7 +78,11 @@ def _resolve_secret(arn: str) -> str:
     import boto3  # type: ignore[import-untyped]
 
     client = boto3.client("secretsmanager")
-    resp = client.get_secret_value(SecretId=arn)
+    try:
+        resp = client.get_secret_value(SecretId=arn)
+    except Exception:
+        logger.error("Failed to resolve secret: %s", arn)
+        raise
     return str(resp["SecretString"])
 
 
@@ -87,7 +91,11 @@ def _resolve_ssm_parameter(name: str) -> str:
     import boto3
 
     client = boto3.client("ssm")
-    resp = client.get_parameter(Name=name)
+    try:
+        resp = client.get_parameter(Name=name)
+    except Exception:
+        logger.error("Failed to resolve SSM parameter: %s", name)
+        raise
     return str(resp["Parameter"]["Value"])
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from unittest.mock import AsyncMock, patch
 
 import asyncpg
@@ -62,6 +63,16 @@ class TestConnect:
             with pytest.raises(DatabaseConnectionError, match="bad password"):
                 await conn.connect()
 
+    async def test_connect_logs_postgres_error(self, conn, caplog):
+        with patch(
+            "finance_query_agent.connection.asyncpg.connect",
+            side_effect=asyncpg.InvalidPasswordError("bad password"),
+        ):
+            with caplog.at_level(logging.ERROR, logger="finance_query_agent.connection"):
+                with pytest.raises(DatabaseConnectionError):
+                    await conn.connect()
+        assert "Database connection failed" in caplog.text
+
 
 class TestClose:
     async def test_close_when_connected(self, conn):
@@ -80,6 +91,15 @@ class TestClose:
         await conn.close()
         await conn.close()
         mock_connection.close.assert_called_once()
+
+    async def test_close_swallows_and_logs_error(self, conn, caplog):
+        mock_connection = AsyncMock()
+        mock_connection.close.side_effect = OSError("connection reset")
+        conn._conn = mock_connection
+        with caplog.at_level(logging.ERROR, logger="finance_query_agent.connection"):
+            await conn.close()  # should not raise
+        assert conn._conn is None
+        assert "Failed to close database connection" in caplog.text
 
 
 class TestExecute:
