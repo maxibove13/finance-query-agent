@@ -15,7 +15,7 @@ from finance_query_agent.schemas.tool_results import MerchantSpending, Transacti
 from finance_query_agent.tools import AgentDeps
 from finance_query_agent.tools.transactions import get_top_merchants, search_transactions
 
-SEED_USER_1 = "test-user-1"
+SEED_USER_1 = 1
 
 
 def _make_ctx(conn: Connection, qb: QueryBuilder, schema: SchemaMapping, user_id: str) -> RunContext[AgentDeps]:

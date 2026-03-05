@@ -11,10 +11,11 @@ from pydantic_ai.exceptions import UsageLimitExceeded
 
 import finance_query_agent.handler as handler_module
 from finance_query_agent.handler import _process_request, handler
+from finance_query_agent.validation.schema_validator import ColumnTypeInfo
 
 _PATCH_TARGET = "finance_query_agent.handler._process_request"
 
-_EVENT = {"user_id": "u1", "session_id": "s1", "question": "q"}
+_EVENT = {"user_id": 1, "session_id": "s1", "question": "q"}
 
 
 # ── Outer handler (direct invocation envelope) ──────────────────────────────
@@ -58,7 +59,7 @@ class TestHandler:
 
 # ── _process_request orchestration ──────────────────────────────────────────
 
-_BODY = {"user_id": "u1", "session_id": "s1", "question": "test?"}
+_BODY = {"user_id": 1, "session_id": "s1", "question": "test?"}
 
 
 def _build_mocks() -> dict:
@@ -95,7 +96,9 @@ def _build_mocks() -> dict:
         "finance_query_agent.encryption.FieldEncryptor": MagicMock(),
         "finance_query_agent.memory.ConversationMemory": MagicMock(return_value=memory),
         "finance_query_agent.query_builder.QueryBuilder": MagicMock(),
-        "finance_query_agent.validation.schema_validator.validate_schema": AsyncMock(),
+        "finance_query_agent.validation.schema_validator.validate_schema": AsyncMock(
+            return_value=ColumnTypeInfo(user_id_type="int4", direction_is_enum=True)
+        ),
         "finance_query_agent.agent.get_agent": MagicMock(return_value=agent),
     }
 
@@ -177,7 +180,7 @@ class TestProcessRequest:
 
         mocks["memory"].save_history.assert_awaited_once()
         args = mocks["memory"].save_history.call_args[0]
-        assert args[0] == "u1"
+        assert args[0] == "1"  # DynamoDB uses string keys
         assert args[1] == "s1"
 
     @pytest.mark.asyncio()
@@ -187,7 +190,7 @@ class TestProcessRequest:
             await _process_request(_BODY)
 
         deps = mocks["agent"].run.call_args.kwargs["deps"]
-        assert deps.user_id == "u1"
+        assert deps.user_id == 1
 
     @pytest.mark.asyncio()
     async def test_returns_200_on_usage_limit_exceeded(self, mocks: dict) -> None:

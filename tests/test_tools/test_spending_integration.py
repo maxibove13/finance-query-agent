@@ -16,8 +16,8 @@ from finance_query_agent.schemas.tool_results import AccountSummary, CategorySpe
 from finance_query_agent.tools import AgentDeps
 from finance_query_agent.tools.spending import get_balance_summary, get_monthly_totals, get_spending_by_category
 
-SEED_USER_1 = "test-user-1"
-SEED_USER_2 = "test-user-2"
+SEED_USER_1 = 1
+SEED_USER_2 = 2
 
 
 def _make_ctx(conn: Connection, qb: QueryBuilder, schema: SchemaMapping, user_id: str) -> RunContext[AgentDeps]:
@@ -130,7 +130,7 @@ class TestGetBalanceSummaryIntegration:
     async def test_filter_by_account(self, db_connection, query_builder, sample_schema_mapping):
         ctx = _make_ctx(db_connection, query_builder, sample_schema_mapping, SEED_USER_1)
 
-        result = await get_balance_summary(ctx, account_id="acc-2")
+        result = await get_balance_summary(ctx, account_id=2)
 
         assert len(result) == 1
         assert result[0].currency == "UYU"

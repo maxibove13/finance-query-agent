@@ -62,7 +62,7 @@ def _env(postgres_url: str, sample_schema_mapping: SchemaMapping):
             os.environ[k] = v
 
 
-def _make_event(user_id: str, session_id: str, question: str) -> dict:
+def _make_event(user_id: int, session_id: str, question: str) -> dict:
     return {"user_id": user_id, "session_id": session_id, "question": question}
 
 
@@ -72,7 +72,7 @@ def test_e2e_spending_question(_env, dynamodb_table):
     from finance_query_agent.handler import handler
 
     result = handler(
-        _make_event("test-user-1", "e2e-session-1", "How much did I spend on groceries in November 2025?"),
+        _make_event(1, "e2e-session-1", "How much did I spend on groceries in November 2025?"),
         None,
     )
 
@@ -88,7 +88,7 @@ def test_e2e_multi_currency(_env, dynamodb_table):
     from finance_query_agent.handler import handler
 
     result = handler(
-        _make_event("test-user-1", "e2e-session-2", "What were my total expenses in November 2025?"),
+        _make_event(1, "e2e-session-2", "What were my total expenses in November 2025?"),
         None,
     )
 
@@ -104,7 +104,7 @@ def test_e2e_conversation_memory(_env, dynamodb_table):
 
     # First turn
     r1 = handler(
-        _make_event("test-user-1", "e2e-session-3", "How much did I spend on groceries in October 2025?"),
+        _make_event(1, "e2e-session-3", "How much did I spend on groceries in October 2025?"),
         None,
     )
     assert "error" not in r1
@@ -120,7 +120,7 @@ def test_e2e_conversation_memory(_env, dynamodb_table):
 
     # Second turn — same session, follow-up question
     r2 = handler(
-        _make_event("test-user-1", "e2e-session-3", "And how about November?"),
+        _make_event(1, "e2e-session-3", "And how about November?"),
         None,
     )
     assert "error" not in r2
@@ -129,16 +129,16 @@ def test_e2e_conversation_memory(_env, dynamodb_table):
 
 @mock_aws
 def test_e2e_user_isolation(_env, dynamodb_table):
-    """test-user-2 should not see test-user-1 data."""
+    """user 2 should not see user 1 data."""
     from finance_query_agent.handler import handler
 
     result = handler(
-        _make_event("test-user-2", "e2e-session-4", "Show me all my transactions in November 2025"),
+        _make_event(2, "e2e-session-4", "Show me all my transactions in November 2025"),
         None,
     )
 
     assert "error" not in result
-    # test-user-2 only has one transaction — "Other User Groceries"
+    # user 2 only has one transaction — "Other User Groceries"
     assert "whole foods" not in result["answer"].lower()
 
 
@@ -147,5 +147,5 @@ def test_e2e_missing_field(_env, dynamodb_table):
     """Missing required field returns 400."""
     from finance_query_agent.handler import handler
 
-    result = handler({"user_id": "x"}, None)
+    result = handler({"user_id": 99}, None)
     assert "error" in result

@@ -16,7 +16,7 @@ from finance_query_agent.schemas.tool_results import CategoryBreakdown, PeriodCo
 from finance_query_agent.tools import AgentDeps
 from finance_query_agent.tools.trends import compare_periods, get_category_breakdown, get_spending_trend
 
-SEED_USER_1 = "test-user-1"
+SEED_USER_1 = 1
 
 
 def _make_ctx(conn: Connection, qb: QueryBuilder, schema: SchemaMapping, user_id: str) -> RunContext[AgentDeps]:

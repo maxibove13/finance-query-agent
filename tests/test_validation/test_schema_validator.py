@@ -14,7 +14,7 @@ from finance_query_agent.schemas.mapping import (
     SchemaMapping,
     TableMapping,
 )
-from finance_query_agent.validation.schema_validator import introspect_schema, validate_schema
+from finance_query_agent.validation.schema_validator import ColumnTypeInfo, introspect_schema, validate_schema
 from tests.conftest import skip_without_docker
 
 # SQL to create the test schema matching the spec's sample
@@ -152,7 +152,12 @@ async def conn(postgres_url):
 
 class TestValidateSchema:
     async def test_valid_schema_passes(self, conn):
-        await validate_schema(_valid_schema(), conn)
+        result = await validate_schema(_valid_schema(), conn)
+        assert isinstance(result, ColumnTypeInfo)
+        # user_id is on accounts table, declared as UUID in this test schema
+        assert result.user_id_type == "uuid"
+        # movement_direction is TEXT in this test schema, not an enum
+        assert result.direction_is_enum is False
 
     async def test_missing_table_raises(self, conn):
         schema = SchemaMapping(

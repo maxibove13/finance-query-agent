@@ -10,6 +10,12 @@ Deployed financial query agent service (Lambda invoked by MPI's backend via boto
 
 **Spec:** See `docs/finance-query-agent-spec.md` for the full specification (tool signatures, query patterns, security).
 
+## AWS
+
+- **AWS Profile:** `my_personal_incomes` (use `--profile my_personal_incomes` for all AWS CLI commands)
+- **Region:** `us-west-2`
+- **Lambda function name:** `finance-query-agent`
+
 ## Essential Commands
 
 ```bash

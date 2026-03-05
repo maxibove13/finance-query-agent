@@ -99,7 +99,7 @@ class QueryBuilder:
             params.append(conv.expense_value)
             idx = len(params)
             col = f"{table.table}.{conv.direction_column}"
-            where.append(f"{col} = ${idx}")
+            where.append(f"{col}::text = ${idx}")
         else:
             where.append(self._expense_filter(conv, table))
 
@@ -116,7 +116,7 @@ class QueryBuilder:
             params.append(conv.income_value)
             idx = len(params)
             col = f"{table.table}.{conv.direction_column}"
-            where.append(f"{col} = ${idx}")
+            where.append(f"{col}::text = ${idx}")
         else:
             where.append(self._income_filter(conv, table))
 
@@ -138,7 +138,7 @@ class QueryBuilder:
         table: TableMapping,
         where: list[str],
         params: list[Any],
-        user_id: str,
+        user_id: Any,
     ) -> None:
         """Add user_id = $N to where and params."""
         params.append(user_id)
@@ -179,7 +179,7 @@ class QueryBuilder:
     def _build_union_query(
         self,
         *,
-        user_id: str,
+        user_id: Any,
         build_one: Callable[..., tuple[str, list[Any]]],
     ) -> GeneratedQuery:
         """Build a UNION ALL query across all transaction tables.
@@ -204,7 +204,7 @@ class QueryBuilder:
 
     def build_spending_by_category(
         self,
-        user_id: str,
+        user_id: Any,
         period_start: date,
         period_end: date,
         categories: list[str] | None = None,
@@ -274,7 +274,7 @@ class QueryBuilder:
 
     def build_monthly_totals(
         self,
-        user_id: str,
+        user_id: Any,
         period_start: date,
         period_end: date,
         account_id: str | None = None,
@@ -337,7 +337,7 @@ class QueryBuilder:
 
     def build_top_merchants(
         self,
-        user_id: str,
+        user_id: Any,
         period_start: date,
         period_end: date,
         limit: int = 10,
@@ -405,7 +405,7 @@ class QueryBuilder:
 
     def build_compare_periods(
         self,
-        user_id: str,
+        user_id: Any,
         period_a_start: date,
         period_a_end: date,
         period_b_start: date,
@@ -494,7 +494,7 @@ class QueryBuilder:
 
     def build_search_transactions(
         self,
-        user_id: str,
+        user_id: Any,
         query: str | None = None,
         period_start: date | None = None,
         period_end: date | None = None,
@@ -634,7 +634,7 @@ class QueryBuilder:
 
     def build_category_breakdown(
         self,
-        user_id: str,
+        user_id: Any,
         period_start: date,
         period_end: date,
         account_id: str | None = None,
@@ -682,7 +682,7 @@ class QueryBuilder:
 
     def build_spending_trend(
         self,
-        user_id: str,
+        user_id: Any,
         period_start: date,
         period_end: date,
         granularity: Literal["week", "month"] = "month",
@@ -756,7 +756,7 @@ class QueryBuilder:
 
     def build_balance_summary(
         self,
-        user_id: str,
+        user_id: Any,
         account_id: str | None = None,
     ) -> GeneratedQuery:
         """Spec 7.8: Most recent balance per account. Only works if 'balance' is mapped."""
@@ -794,7 +794,7 @@ class QueryBuilder:
 
     def build_recurring_expenses(
         self,
-        user_id: str,
+        user_id: Any,
         period_start: date,
         period_end: date,
         min_occurrences: int = 3,
