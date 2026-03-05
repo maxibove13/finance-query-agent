@@ -1,0 +1,2 @@
+schema_config_json = "{}"  # Your SchemaMapping JSON
+allowed_origins    = ["https://your-frontend.cloudfront.net"]

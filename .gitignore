@@ -29,6 +29,12 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
+# Terraform
+*.tfvars
+!*.tfvars.example
+.terraform/
+*.tfstate*
+
 # Environment
 .env
 .env.local

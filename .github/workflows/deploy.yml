@@ -1,0 +1,125 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: "Force Docker rebuild (ignore cache)"
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: test_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Ruff lint
+        run: uv run ruff check .
+
+      - name: Ruff format check
+        run: uv run ruff format --check .
+
+      - name: mypy
+        run: uv run mypy src/
+
+      - name: Run tests
+        run: uv run pytest
+        env:
+          TEST_DATABASE_URL: postgresql://test:test@localhost:5432/test_db
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set version
+        id: version
+        run: echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Login to ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Ensure ECR repository exists
+        run: |
+          aws ecr describe-repositories --repository-names finance-query-agent 2>/dev/null || \
+            aws ecr create-repository --repository-name finance-query-agent \
+              --image-scanning-configuration scanOnPush=true \
+              --image-tag-mutability MUTABLE
+
+      - name: Build and push Docker image
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          IMAGE_TAG: ${{ steps.version.outputs.sha }}
+          FORCE_REBUILD: ${{ github.event.inputs.force_rebuild }}
+        run: |
+          CACHE_FLAG=""
+          if [ "$FORCE_REBUILD" = "true" ]; then
+            CACHE_FLAG="--no-cache"
+          fi
+          docker build $CACHE_FLAG \
+            -t "$ECR_REGISTRY/finance-query-agent:$IMAGE_TAG" \
+            -t "$ECR_REGISTRY/finance-query-agent:latest" \
+            .
+          docker push "$ECR_REGISTRY/finance-query-agent:$IMAGE_TAG"
+          docker push "$ECR_REGISTRY/finance-query-agent:latest"
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform init
+        working-directory: terraform
+        run: terraform init
+
+      - name: Terraform apply
+        working-directory: terraform
+        run: terraform apply -auto-approve -input=false
+        env:
+          TF_VAR_schema_config_json: ${{ secrets.SCHEMA_CONFIG_JSON }}
+          TF_VAR_allowed_origins: ${{ vars.ALLOWED_ORIGINS }}
+          TF_VAR_ecr_image_uri: "${{ steps.ecr-login.outputs.registry }}/finance-query-agent:${{ steps.version.outputs.sha }}"
+

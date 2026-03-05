@@ -3,62 +3,23 @@ variable "project_name" {
   default = "finance-query-agent"
 }
 
-# Network — consumer provides their existing VPC
-variable "vpc_id" {
-  type = string
-}
-
-variable "subnet_ids" {
-  type = list(string)
-}
-
-variable "rds_security_group_id" {
-  type        = string
-  description = "Security group of the RDS instance (agent gets ingress rule added)"
-}
-
-# Database
-variable "rds_endpoint" {
-  type = string
-}
-
-variable "db_credentials_secret_arn" {
-  type        = string
-  description = "Secrets Manager ARN for read-only DB credentials"
-}
-
-# Encryption
-variable "encryption_key_secret_arn" {
-  type        = string
-  description = "Secrets Manager ARN for Fernet encryption key"
-}
-
 # LLM
-variable "llm_api_key_secret_arn" {
-  type = string
-}
-
 variable "llm_model" {
   type    = string
   default = "openai:gpt-4o"
 }
 
-# Observability
-variable "logfire_token_secret_arn" {
-  type    = string
-  default = ""
+# Schema
+variable "schema_config_json" {
+  type        = string
+  sensitive   = true
+  description = "SchemaMapping JSON configuration"
 }
 
 # CORS
 variable "allowed_origins" {
   type        = list(string)
   description = "Origins allowed to call the Function URL (frontend domains)"
-}
-
-# Schema
-variable "schema_config_json" {
-  type        = string
-  description = "SchemaMapping JSON configuration"
 }
 
 # Lambda

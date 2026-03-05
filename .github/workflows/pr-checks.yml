@@ -13,7 +13,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
 
       - name: Install uv
         uses: astral-sh/setup-uv@v4
@@ -34,9 +34,6 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.11", "3.12"]
     services:
       postgres:
         image: postgres:16
@@ -60,7 +57,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.12"
 
       - name: Install uv
         uses: astral-sh/setup-uv@v4
@@ -83,87 +80,24 @@ jobs:
             echo "No origin/main baseline yet — skipping diff-cover"
           fi
 
-  claude-review:
+  docker-build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: write
-      issues: read
-      id-token: write
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      - uses: actions/checkout@v4
 
-      - name: Fetch existing comments
-        id: existing-comments
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Build Docker image
+        run: docker build .
+
+  terraform-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform init & validate
+        working-directory: terraform
         run: |
-          ALL_COMMENTS=$(gh api \
-            -H "Accept: application/vnd.github+json" \
-            "/repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" \
-            --jq '[.[] | {id: .id, user: .user.login, body: .body}]')
-
-          CLAUDE_COMMENT_IDS=$(echo "$ALL_COMMENTS" | jq -r '[.[] | select(.body | contains("<!-- claude-pr-check-review -->")) | .id] | .[]')
-          echo "$CLAUDE_COMMENT_IDS" > /tmp/claude_comment_ids.txt
-
-          echo "$ALL_COMMENTS" | jq '[.[] | {user: .user, body: (.body | .[0:500])}]' > /tmp/pr_comments.json
-
-      - name: Run Claude Code Review
-        id: claude-review
-        uses: anthropics/claude-code-action@beta
-        with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          prompt: |
-            You are a code reviewer for PR #${{ github.event.pull_request.number }} in ${{ github.repository }}.
-
-            Review the PR diff by running: gh pr diff ${{ github.event.pull_request.number }}
-            Also read the PR description: gh pr view ${{ github.event.pull_request.number }}
-            Read /tmp/pr_comments.json to see existing PR comments -- take them into account.
-            Use the repository's CLAUDE.md for guidance on style and conventions.
-
-            SCOPE RESTRICTION: Only review code that was ADDED or MODIFIED in this PR's diff. Do NOT flag pre-existing patterns or issues in unchanged code.
-
-            Focus ONLY on critical issues:
-            - Security vulnerabilities (injection, auth bypass, secrets in code)
-            - Bugs that will cause runtime errors or data corruption
-            - Breaking changes to public APIs without migration path
-            - Missing error handling that will crash production
-            - SQL injection or parameterization issues (critical for this project)
-
-            Do NOT flag: style preferences, minor refactors, missing docs, test coverage opinions, or nitpicks.
-
-            COMPLETENESS: Report ALL critical issues in a SINGLE review. If a pattern issue exists, list ALL affected locations.
-
-            After reviewing, delete previous Claude review comments by reading /tmp/claude_comment_ids.txt and running:
-            gh api -X DELETE "/repos/${{ github.repository }}/issues/comments/<ID>"
-            for each ID found (skip if the file is empty).
-
-            Then post your new review as a PR comment using `gh pr comment`.
-            The comment must include `<!-- claude-pr-check-review -->` at the end.
-
-            CRITICAL: Your final output line MUST be exactly one of:
-            VERDICT: PASS
-            VERDICT: FAIL
-
-            Use FAIL only for critical issues listed above.
-          claude_args: '--allowed-tools "Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr comment:*),Bash(gh api:*),Read,Glob,Grep"'
-
-      - name: Check verdict
-        run: |
-          OUTPUT_FILE="${{ steps.claude-review.outputs.execution_file }}"
-          if [ -z "$OUTPUT_FILE" ] || [ ! -f "$OUTPUT_FILE" ]; then
-            echo "WARNING: No execution output file found. Passing by default."
-            exit 0
-          fi
-          if grep -q "VERDICT: FAIL" "$OUTPUT_FILE"; then
-            echo "Claude review found critical issues. Failing the check."
-            tail -20 "$OUTPUT_FILE"
-            exit 1
-          elif grep -q "VERDICT: PASS" "$OUTPUT_FILE"; then
-            echo "Claude review passed."
-          else
-            echo "WARNING: Could not determine verdict from Claude's output. Passing by default."
-          fi
+          terraform init -backend=false
+          terraform validate

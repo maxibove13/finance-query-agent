@@ -64,7 +64,7 @@ def _build_mocks() -> dict:
     memory = AsyncMock()
     memory.load_history.return_value = []
 
-    usage = MagicMock(request_tokens=100, response_tokens=50)
+    usage = MagicMock(input_tokens=100, output_tokens=50)
     result = MagicMock()
     result.output = "The answer is 42"
     result.all_messages.return_value = [{"role": "user", "content": "q"}]
