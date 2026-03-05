@@ -1,6 +1,6 @@
 # finance-query-agent
 
-AI-powered financial query agent. Answers natural language questions about spending, income, and transactions. Deployed as an AWS Lambda behind a Function URL.
+AI-powered financial query agent. Answers natural language questions about spending, income, and transactions. Deployed as an AWS Lambda invoked by MPI's backend via `boto3 lambda.invoke()`.
 
 Uses a **tools-as-wrappers** architecture: the LLM picks a tool and fills parameters, the service generates and executes parameterized SQL. No raw SQL from the LLM for the common case — a constrained SQL fallback covers the long tail.
 
@@ -16,7 +16,7 @@ sequenceDiagram
     participant Dynamo as DynamoDB
 
     Client->>Backend: "How much did I spend on groceries?"
-    Backend->>Lambda: POST (SigV4 signed)
+    Backend->>Lambda: boto3 lambda.invoke()
 
     Lambda->>Dynamo: Load conversation history
     Dynamo-->>Lambda: Encrypted messages (Fernet)
@@ -45,13 +45,10 @@ graph TB
     end
 
     FE -->|question| BE
-    BE -->|SigV4 POST| FURL
+    BE -->|boto3 invoke| HANDLER
 
     subgraph AWS["AWS"]
-        FURL[Function URL<br/><i>IAM Auth</i>]
-        FURL --> HANDLER
-
-        subgraph Lambda["Lambda (15 min timeout)"]
+        subgraph Lambda["Lambda (30s timeout)"]
             HANDLER[handler.py<br/><i>Entry point</i>]
             HANDLER --> AGENT
             AGENT[Pydantic AI Agent<br/><i>agent.py</i>]
@@ -191,7 +188,7 @@ graph TB
 ```mermaid
 graph TB
     subgraph AUTH["Authentication"]
-        SIGV4["AWS SigV4<br/><i>Function URL + IAM</i>"]
+        IAM["MPI Backend<br/><i>boto3 invoke + IAM role</i>"]
     end
 
     subgraph ISOLATION["User Isolation"]
@@ -261,7 +258,7 @@ graph LR
 
 ## Invocation
 
-The Function URL requires AWS SigV4 authentication. Send a POST request:
+POST request with JSON body:
 
 ```json
 {
@@ -288,7 +285,7 @@ Response:
 
 ```
 src/finance_query_agent/
-├── handler.py              Lambda entry point (Function URL)
+├── handler.py              Lambda entry point
 ├── agent.py                Pydantic AI agent + system prompt
 ├── config.py               Settings from env vars
 ├── query_builder.py        SchemaMapping → parameterized SQL

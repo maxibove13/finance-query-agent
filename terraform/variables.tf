@@ -13,13 +13,8 @@ variable "llm_model" {
 variable "schema_config_json" {
   type        = string
   sensitive   = true
-  description = "SchemaMapping JSON configuration"
-}
-
-# CORS
-variable "allowed_origins" {
-  type        = list(string)
-  description = "Origins allowed to call the Function URL (frontend domains)"
+  description = "SchemaMapping JSON — seeds SSM parameter on first apply, ignored after"
+  default     = "{}"
 }
 
 # Lambda
@@ -30,15 +25,9 @@ variable "memory_size" {
 
 variable "timeout" {
   type    = number
-  default = 120
+  default = 30
 }
 
 variable "ecr_image_uri" {
   type = string
-}
-
-variable "authorized_caller_arns" {
-  type        = list(string)
-  default     = []
-  description = "IAM ARNs allowed to invoke the Function URL (SigV4 auth)"
 }

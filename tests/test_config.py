@@ -53,3 +53,32 @@ class TestResolveSecrets:
         s = Settings()
         # Should not raise or call boto3
         s.resolve_secrets()
+
+
+class TestResolveSSM:
+    def test_ssm_param_populates_schema_config_json(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        schema_data = {"transactions": {"table": "txns"}}
+        expected_json = json.dumps(schema_data)
+
+        monkeypatch.setattr(
+            "finance_query_agent.config._resolve_ssm_parameter",
+            lambda name: expected_json,
+        )
+
+        s = Settings(schema_config_ssm_param="/test/schema-config")  # type: ignore[call-arg]
+        s.resolve_secrets()
+        assert s.schema_config_json == expected_json
+
+    def test_env_var_takes_precedence_over_ssm(self) -> None:
+        """When both schema_config_json and ssm_param are set, env var wins."""
+        s = Settings(
+            schema_config_json='{"already": "set"}',  # type: ignore[call-arg]
+            schema_config_ssm_param="/test/schema-config",  # type: ignore[call-arg]
+        )
+        s.resolve_secrets()
+        assert s.schema_config_json == '{"already": "set"}'
+
+    def test_ssm_not_called_when_param_not_set(self) -> None:
+        """When schema_config_ssm_param is None, no SSM call."""
+        s = Settings()
+        s.resolve_secrets()  # Should not raise even without boto3

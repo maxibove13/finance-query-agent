@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Deployed financial query agent service (Lambda behind Function URL) that answers natural language questions about spending, income, and transactions. Uses Pydantic AI as the agent framework with predefined parameterized query tools + a constrained SQL fallback. Owns conversation memory (DynamoDB), observability (Logfire), and PII protection (Fernet encryption + regex scrubbing).
+Deployed financial query agent service (Lambda invoked by MPI's backend via boto3) that answers natural language questions about spending, income, and transactions. Uses Pydantic AI as the agent framework with predefined parameterized query tools + a constrained SQL fallback. Owns conversation memory (DynamoDB), observability (Logfire), and PII protection (Fernet encryption + regex scrubbing).
 
 **Primary client:** MPI (My Personal Income) — the frontend/app project at `../my_personal_incomes_ai`.
 
@@ -34,16 +34,16 @@ uv build                          # Build package
 ## Architecture
 
 ```
-Browser -> Function URL -> Agent Lambda
-                            ├── asyncpg -> RDS (read-only, single connection)
-                            ├── Pydantic AI -> LLM API
-                            ├── DynamoDB (encrypted conversation history)
-                            └── Logfire (PII-scrubbed traces)
+Browser -> MPI API Gateway -> MPI Lambda -> boto3 invoke -> Agent Lambda
+                                                             ├── asyncpg -> RDS (read-only, single connection)
+                                                             ├── Pydantic AI -> LLM API
+                                                             ├── DynamoDB (encrypted conversation history)
+                                                             └── Logfire (PII-scrubbed traces)
 ```
 
 | What | Where |
 |------|-------|
-| Lambda handler (Function URL entry point) | `src/finance_query_agent/handler.py` |
+| Lambda handler (entry point) | `src/finance_query_agent/handler.py` |
 | Agent definition (Pydantic AI) | `src/finance_query_agent/agent.py` |
 | Settings from env vars | `src/finance_query_agent/config.py` |
 | SQL generation from schema mappings | `src/finance_query_agent/query_builder.py` |
@@ -63,7 +63,7 @@ Browser -> Function URL -> Agent Lambda
 
 ## Key Design Decisions
 
-- **Service, not SDK:** Lambda behind Function URL (15 min timeout, no API Gateway 30s limit). Synchronous request-response.
+- **Service, not SDK:** Lambda invoked by MPI's backend via `boto3 lambda.invoke()` (30s timeout). Synchronous request-response.
 - **Tools-as-wrappers:** The LLM picks a tool and fills params; the service generates and executes parameterized SQL. No raw SQL from the LLM for the common case.
 - **Schema mapping:** Declarative `SchemaMapping` config. The service derives all queries from it.
 - **Multi-currency:** Results always grouped per currency. Never converts or sums across currencies.

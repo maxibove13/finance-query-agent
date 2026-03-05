@@ -94,9 +94,8 @@ echo "2) Configure GitHub repository secrets and variables:"
 echo
 echo "  gh secret set AWS_ACCESS_KEY_ID --body '<your-aws-access-key>'"
 echo "  gh secret set AWS_SECRET_ACCESS_KEY --body '<your-aws-secret-key>'"
-echo "  gh secret set SCHEMA_CONFIG_JSON --body '<your-schema-mapping-json>'"
-echo "  gh variable set ALLOWED_ORIGINS --body '[\"https://your-frontend.cloudfront.net\"]'"
 echo
 echo "3) Push to main to trigger the deploy pipeline."
+echo "   Schema config is managed via SSM Parameter Store — the client's CI/CD updates it."
 echo
 echo "=== Done ==="

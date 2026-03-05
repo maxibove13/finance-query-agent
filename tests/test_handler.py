@@ -41,6 +41,24 @@ class TestHandler:
         body = json.loads(result["body"])
         assert "user_id" in body["error"]
 
+    def test_returns_503_on_schema_mismatch(self) -> None:
+        from finance_query_agent.exceptions import SchemaValidationError
+
+        with patch(
+            _PATCH_TARGET,
+            new_callable=AsyncMock,
+            side_effect=SchemaValidationError("column 'foo' does not exist on table 'bar'"),
+        ):
+            result = handler(
+                {"body": json.dumps({"user_id": "u1", "session_id": "s1", "question": "q"})},
+                None,
+            )
+
+        assert result["statusCode"] == 503
+        body = json.loads(result["body"])
+        assert body["error"] == "schema_mismatch"
+        assert "foo" in body["message"]
+
     def test_returns_500_on_unexpected_error(self) -> None:
         with patch(_PATCH_TARGET, new_callable=AsyncMock, side_effect=RuntimeError("boom")):
             result = handler(

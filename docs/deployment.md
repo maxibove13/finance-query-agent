@@ -9,8 +9,8 @@
 
 ## Setup Flow
 
-1. Configure GitHub secrets/variables (see below)
-2. Merge to `main` -- deploy pipeline creates all AWS resources (ECR, Lambda, DynamoDB, Function URL, Secrets Manager shells)
+1. Configure GitHub secrets (see below)
+2. Merge to `main` -- deploy pipeline creates all AWS resources (ECR, Lambda, DynamoDB, Secrets Manager shells)
 3. Run `scripts/bootstrap.sh` to populate secret values
 4. Create the read-only PostgreSQL user (SQL printed by bootstrap)
 
@@ -19,19 +19,27 @@
 **Secrets:**
 - `AWS_ACCESS_KEY_ID`
 - `AWS_SECRET_ACCESS_KEY`
-- `SCHEMA_CONFIG_JSON` -- your SchemaMapping JSON
-
-**Variables:**
-- `ALLOWED_ORIGINS` -- HCL list, e.g. `["https://d1234.cloudfront.net"]`
 
 ## Terraform
 
 The `terraform/` directory is self-contained. The deploy pipeline runs `terraform apply` automatically on merge to `main`. Secrets Manager secrets are created by Terraform (empty shells), then populated by `scripts/bootstrap.sh`.
 
 Required Terraform variables (passed via `TF_VAR_*` in CI):
-- `schema_config_json` -- SchemaMapping JSON
-- `allowed_origins` -- list of frontend origins
 - `ecr_image_uri` -- set dynamically by CI
+
+## Schema Config
+
+The `SchemaMapping` JSON is stored in SSM Parameter Store at `/<project-name>/schema-config`. The SSM parameter is created by Terraform on first deploy. After that, the client's CI/CD pipeline (e.g. MPI) is responsible for updating it via `aws ssm put-parameter --overwrite`.
+
+**Important:** The Lambda reads SSM once per cold start (cached via `get_settings()`). After updating the parameter, force a cold start so the Lambda picks up the new config:
+
+```bash
+aws lambda update-function-configuration \
+  --function-name finance-query-agent \
+  --description "schema config updated $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+```
+
+If the new schema config doesn't match the live database, the Lambda returns `503 schema_mismatch` -- the client should treat this as a non-retryable config error.
 
 ## Secrets
 
@@ -42,73 +50,26 @@ Four secrets are managed in Secrets Manager (created by Terraform, populated by 
 3. **LLM API key** -- OpenAI API key
 4. **Logfire token** (optional) -- for observability
 
-## Backend Integration
+## Integration
 
-The Function URL uses `AWS_IAM` authorization. Callers must sign requests with SigV4. This is intended for backend-to-backend calls, not direct browser access.
+The Lambda is invoked by MPI's backend via `boto3.client('lambda').invoke()`. MPI owns authentication and user identity. This project only provides the Lambda.
 
-```env
-AGENT_FUNCTION_URL=<function_url from terraform output>
-```
+Terraform outputs for MPI's integration:
+- `lambda_function_name` -- for `boto3.client('lambda').invoke(FunctionName=...)`
+- `lambda_function_arn` -- for IAM permissions (`lambda:InvokeFunction`)
 
-### Python (boto3)
+The caller wraps the payload in `event["body"]`:
 
 ```python
 import json
-from botocore.auth import SigV4Auth
-from botocore.awsrequest import AWSRequest
-import botocore.session
-import requests
+import boto3
 
-session = botocore.session.get_session()
-credentials = session.get_credentials()
-
-body = json.dumps({
-    "user_id": "user-123",
-    "session_id": "session-abc",
-    "question": "How much did I spend on groceries last month?"
-})
-
-request = AWSRequest(method="POST", url=AGENT_FUNCTION_URL, data=body,
-                     headers={"Content-Type": "application/json"})
-SigV4Auth(credentials, "lambda", "us-east-1").add_auth(request)
-
-response = requests.post(request.url, headers=dict(request.headers), data=body)
-```
-
-### Node.js (aws4)
-
-```javascript
-const aws4 = require("aws4");
-const https = require("https");
-
-const body = JSON.stringify({
-  user_id: "user-123",
-  session_id: "session-abc",
-  question: "How much did I spend on groceries last month?"
-});
-
-const opts = aws4.sign({
-  host: new URL(process.env.AGENT_FUNCTION_URL).host,
-  path: "/",
-  method: "POST",
-  body,
-  service: "lambda",
-  region: "us-east-1",
-  headers: { "Content-Type": "application/json" },
-});
-
-// Use opts.headers with your HTTP client (fetch, axios, etc.)
-```
-
-### Granting Access
-
-Add caller IAM role ARNs to the `authorized_caller_arns` Terraform variable:
-
-```hcl
-module "finance_agent" {
-  # ...
-  authorized_caller_arns = [
-    "arn:aws:iam::123456789012:role/my-backend-role",
-  ]
-}
+lambda_client = boto3.client("lambda")
+payload = {"user_id": "user-123", "session_id": "session-abc", "question": "..."}
+response = lambda_client.invoke(
+    FunctionName="finance-query-agent",
+    Payload=json.dumps({"body": json.dumps(payload)}),
+)
+result = json.loads(response["Payload"].read())
+answer = json.loads(result["body"])
 ```

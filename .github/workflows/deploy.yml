@@ -119,7 +119,5 @@ jobs:
         working-directory: terraform
         run: terraform apply -auto-approve -input=false
         env:
-          TF_VAR_schema_config_json: ${{ secrets.SCHEMA_CONFIG_JSON }}
-          TF_VAR_allowed_origins: ${{ vars.ALLOWED_ORIGINS }}
           TF_VAR_ecr_image_uri: "${{ steps.ecr-login.outputs.registry }}/finance-query-agent:${{ steps.version.outputs.sha }}"
 

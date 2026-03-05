@@ -35,31 +35,31 @@ Users of financial applications need to ask natural language questions about the
 ## 5. Architecture
 
 ```
-Client (SigV4) ──> Function URL ──> Agent Lambda
-                                     ├── Pydantic AI Agent
-                                     │   ├── get_spending_by_category
-                                     │   ├── get_monthly_totals
-                                     │   ├── get_top_merchants
-                                     │   ├── compare_periods
-                                     │   ├── search_transactions
-                                     │   ├── get_category_breakdown
-                                     │   ├── get_spending_trend
-                                     │   ├── get_balance_summary
-                                     │   ├── get_recurring_expenses
-                                     │   └── [fallback] run_constrained_query
-                                     ├── Query Builder (SchemaMapping → parameterized SQL)
-                                     ├── asyncpg → RDS (read-only, single connection)
-                                     ├── DynamoDB (encrypted conversation history)
-                                     └── Logfire (PII-scrubbed traces)
+MPI Lambda ──> boto3 invoke ──> Agent Lambda
+                                 ├── Pydantic AI Agent
+                                 │   ├── get_spending_by_category
+                                 │   ├── get_monthly_totals
+                                 │   ├── get_top_merchants
+                                 │   ├── compare_periods
+                                 │   ├── search_transactions
+                                 │   ├── get_category_breakdown
+                                 │   ├── get_spending_trend
+                                 │   ├── get_balance_summary
+                                 │   ├── get_recurring_expenses
+                                 │   └── [fallback] run_constrained_query
+                                 ├── Query Builder (SchemaMapping → parameterized SQL)
+                                 ├── asyncpg → RDS (read-only, single connection)
+                                 ├── DynamoDB (encrypted conversation history)
+                                 └── Logfire (PII-scrubbed traces)
 ```
 
 **The service owns:** agent definition, tool definitions, query building, prompt engineering, response formatting, SQL validation, database connection management, conversation memory, observability, PII protection.
 
-**The consuming app owns:** schema mapping configuration (via Terraform), authentication (AWS IAM on Function URL), user identity.
+**The consuming app owns:** schema mapping configuration (via Terraform), authentication, user identity, and Lambda invocation (via boto3).
 
 ## 6. Schema Mapping (Client Integration)
 
-This is the only thing a client needs to provide. A declarative configuration that tells the service where financial data lives in their database. Passed as JSON via the `SCHEMA_CONFIG_JSON` environment variable (or `SCHEMA_CONFIG_PATH` for a file).
+This is the only thing a client needs to provide. A declarative configuration that tells the service where financial data lives in their database. Stored in SSM Parameter Store at `/<project-name>/schema-config` (or locally via `SCHEMA_CONFIG_JSON` env var / `SCHEMA_CONFIG_PATH` file).
 
 ### 6.1 Configuration Model
 
@@ -429,12 +429,10 @@ Handles queries that don't map to any predefined tool. The agent generates SQL, 
 
 ### 9.1 Service Entry Point
 
-The service is deployed as an AWS Lambda behind a Function URL with IAM authorization. The entry point is `handler.handler` which receives an HTTP POST request and returns a JSON response.
+The service is deployed as an AWS Lambda invoked by the consuming app's backend via `boto3.client('lambda').invoke()`. The entry point is `handler.handler`. The caller wraps the payload as `{"body": json.dumps({...})}` to match the handler's event parsing. The Lambda timeout is 30 seconds to match the API Gateway limit.
 
 ```
-POST <function-url>
-Authorization: AWS SigV4
-Content-Type: application/json
+# Payload wrapped in event["body"]
 
 {
   "user_id": "user-123",
@@ -447,7 +445,7 @@ Configuration is via environment variables (set by Terraform):
 
 | Variable | Description |
 |----------|-------------|
-| `SCHEMA_CONFIG_JSON` | SchemaMapping JSON |
+| `SCHEMA_CONFIG_SSM_PARAM` | SSM parameter name for SchemaMapping JSON (set by Terraform) |
 | `LLM_MODEL` | Pydantic AI model string (default: `openai:gpt-4o`) |
 | `DYNAMODB_TABLE` | DynamoDB table for conversation memory |
 | `DB_CREDENTIALS_SECRET_ARN` | Secrets Manager ARN for DB credentials |
@@ -638,7 +636,7 @@ finance-query-agent/
 
 ## 15. Integration with my_personal_incomes_ai
 
-The consuming app deploys the finance-query-agent as an AWS Lambda via the Terraform module, providing the SchemaMapping as JSON. The frontend calls the Function URL with SigV4 auth.
+The consuming app deploys the finance-query-agent as an AWS Lambda via the Terraform module, providing the SchemaMapping as JSON. MPI's backend invokes the agent Lambda directly via `boto3.client('lambda').invoke()`.
 
 **Terraform integration:**
 
@@ -646,38 +644,28 @@ The consuming app deploys the finance-query-agent as an AWS Lambda via the Terra
 module "finance_agent" {
   source = "../finance-query-agent/terraform"
 
-  vpc_id                    = module.vpc.vpc_id
-  subnet_ids                = module.vpc.private_subnets
-  rds_security_group_id     = aws_security_group.rds.id
-  rds_endpoint              = aws_db_instance.main.endpoint
-  db_credentials_secret_arn = aws_secretsmanager_secret.agent_readonly_db.arn
-  encryption_key_secret_arn = aws_secretsmanager_secret.fernet_key.arn
-  llm_api_key_secret_arn    = aws_secretsmanager_secret.openai_key.arn
-  allowed_origins           = ["https://app.example.com"]
-  authorized_caller_arns    = [aws_iam_role.backend.arn]
-  schema_config_json        = file("${path.module}/agent_schema.json")
-  ecr_image_uri             = "${module.finance_agent.ecr_repository_url}:latest"
+  schema_config_json = file("${path.module}/agent_schema.json")
+  ecr_image_uri      = "${module.finance_agent.ecr_repository_url}:latest"
 }
 ```
 
-**Backend integration** (the backend signs requests with SigV4 and forwards them to the Function URL):
+**Backend integration** (MPI Lambda invokes agent Lambda via boto3):
 
 ```python
-# app/api/chat_endpoints.py
+# app/services/finance_agent_service.py
+import json
 import boto3
-from botocore.auth import SigV4Auth
-from botocore.awsrequest import AWSRequest
 
-@router.post("/api/chat")
-async def chat(question: str, user=Depends(get_current_user)):
-    # Backend signs the request and forwards to the Function URL
-    payload = {
-        "user_id": str(user.id),
-        "session_id": session_id,
-        "question": question,
-    }
-    # ... SigV4 signed HTTP POST to Function URL ...
-    return response.json()
+lambda_client = boto3.client("lambda")
+
+async def query_agent(user_id: str, session_id: str, question: str) -> dict:
+    payload = {"user_id": user_id, "session_id": session_id, "question": question}
+    response = lambda_client.invoke(
+        FunctionName="finance-query-agent",
+        Payload=json.dumps({"body": json.dumps(payload)}),
+    )
+    result = json.loads(response["Payload"].read())
+    return json.loads(result["body"])
 ```
 
 ## 16. Schema Mapping Versioning
