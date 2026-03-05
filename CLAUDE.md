@@ -4,6 +4,8 @@
 
 Deployed financial query agent service (Lambda behind Function URL) that answers natural language questions about spending, income, and transactions. Uses Pydantic AI as the agent framework with predefined parameterized query tools + a constrained SQL fallback. Owns conversation memory (DynamoDB), observability (Logfire), and PII protection (Fernet encryption + regex scrubbing).
 
+**Primary client:** MPI (My Personal Income) — the frontend/app project at `../my_personal_incomes_ai`.
+
 **Stack:** Python 3.11+ | Pydantic AI | asyncpg (PostgreSQL) | boto3 (DynamoDB) | Logfire | uv (package manager)
 
 **Spec:** See `docs/finance-query-agent-spec.md` for the full specification (tool signatures, query patterns, security).
