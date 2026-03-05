@@ -40,6 +40,7 @@ resource "aws_iam_role_policy" "lambda_app" {
         Action = [
           "dynamodb:GetItem",
           "dynamodb:PutItem",
+          "dynamodb:UpdateItem",
           "dynamodb:Query",
         ]
         Resource = [

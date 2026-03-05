@@ -25,6 +25,9 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     except KeyError as e:
         logger.warning("Missing required field: %s", e)
         return {"error": f"Missing required field: {e}"}
+    except ValueError as e:
+        logger.warning("Invalid input: %s", e)
+        return {"error": f"Invalid input: {e}"}
     except SchemaValidationError as e:
         logger.error("Schema config does not match database: %s", e)
         return {"error": "schema_mismatch", "message": str(e)}
@@ -53,8 +56,7 @@ async def _process_request(body: dict[str, Any]) -> AgentResponse:
     from finance_query_agent.tools import AgentDeps
     from finance_query_agent.validation.schema_validator import validate_schema
 
-    # user_id comes from the authenticated caller
-    user_id = body["user_id"]
+    raw_user_id = body["user_id"]
     session_id = body["session_id"]
     question = body["question"]
 
@@ -70,10 +72,21 @@ async def _process_request(body: dict[str, Any]) -> AgentResponse:
         # Load and validate schema
         schema_data = load_schema_json(settings)
         schema = SchemaMapping(**schema_data)
-        await validate_schema(schema, conn)
+        type_info = await validate_schema(schema, conn)
 
-        # Load conversation history
-        history = await memory.load_history(user_id, session_id)
+        # Cast user_id based on discovered DB column type
+        if type_info.user_id_type in ("int2", "int4", "int8", "integer", "bigint", "smallint"):
+            if isinstance(raw_user_id, int) and not isinstance(raw_user_id, bool):
+                user_id = raw_user_id
+            elif isinstance(raw_user_id, str) and raw_user_id.isdigit():
+                user_id = int(raw_user_id)
+            else:
+                raise ValueError(f"user_id must be an integer, got {type(raw_user_id).__name__}: {raw_user_id!r}")
+        else:
+            user_id = raw_user_id
+
+        # Load conversation history (DynamoDB always uses string keys)
+        history = await memory.load_history(str(raw_user_id), session_id)
 
         # Run agent
         from pydantic_ai import UsageLimits
@@ -113,8 +126,8 @@ async def _process_request(body: dict[str, Any]) -> AgentResponse:
                 token_usage=TokenUsage(input_tokens=0, output_tokens=0),
             )
 
-        # Store updated conversation
-        await memory.save_history(user_id, session_id, result.all_messages())
+        # Store updated conversation (DynamoDB always uses string keys)
+        await memory.save_history(str(raw_user_id), session_id, result.all_messages())
 
         # Build response
         usage = result.usage()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 
 from finance_query_agent.connection import Connection
 from finance_query_agent.exceptions import SchemaValidationError
@@ -11,15 +12,33 @@ from finance_query_agent.schemas.mapping import ColumnRef, SchemaMapping, TableM
 logger = logging.getLogger(__name__)
 
 
-async def _get_db_columns(conn: Connection) -> dict[str, set[str]]:
-    """Fetch all table->columns from information_schema. Returns {table: {col1, col2, ...}}."""
+@dataclass
+class ColumnTypeInfo:
+    """Column types discovered from the live DB at cold start."""
+
+    user_id_type: str  # e.g. "int4", "text", "uuid"
+    direction_is_enum: bool  # True if movement_direction is USER-DEFINED (enum)
+
+
+async def _get_db_columns(conn: Connection) -> tuple[dict[str, set[str]], dict[str, dict[str, str]]]:
+    """Fetch all table->columns and their types from information_schema.
+
+    Returns (columns_map, types_map) where:
+        columns_map = {table: {col1, col2, ...}}
+        types_map = {table: {col: udt_name, ...}}
+    """
     rows = await conn.fetch(
-        "SELECT table_name, column_name FROM information_schema.columns WHERE table_schema = 'public'"
+        "SELECT table_name, column_name, data_type, udt_name "
+        "FROM information_schema.columns WHERE table_schema = 'public'"
     )
-    result: dict[str, set[str]] = {}
+    columns: dict[str, set[str]] = {}
+    types: dict[str, dict[str, str]] = {}
     for row in rows:
-        result.setdefault(row["table_name"], set()).add(row["column_name"])
-    return result
+        tbl = row["table_name"]
+        col = row["column_name"]
+        columns.setdefault(tbl, set()).add(col)
+        types.setdefault(tbl, {})[col] = row["udt_name"]
+    return columns, types
 
 
 def _resolve_column(col: str | ColumnRef) -> tuple[str | None, str]:
@@ -70,12 +89,13 @@ def _validate_table_mapping(
             )
 
 
-async def validate_schema(schema: SchemaMapping, conn: Connection) -> None:
+async def validate_schema(schema: SchemaMapping, conn: Connection) -> ColumnTypeInfo:
     """Validate that all mapped tables and columns exist in the live database.
 
+    Returns ColumnTypeInfo with discovered column types for runtime casting.
     Raises SchemaValidationError with all collected errors.
     """
-    db_columns = await _get_db_columns(conn)
+    db_columns, db_types = await _get_db_columns(conn)
     errors: list[str] = []
 
     # Validate each table mapping
@@ -89,7 +109,22 @@ async def validate_schema(schema: SchemaMapping, conn: Connection) -> None:
     if errors:
         raise SchemaValidationError("Schema validation failed:\n  - " + "\n  - ".join(errors))
 
-    logger.info("Schema validation passed")
+    # Discover user_id type from the table that owns it
+    user_id_col = schema.transactions.columns.get("user_id")
+    if isinstance(user_id_col, ColumnRef):
+        user_id_type = db_types.get(user_id_col.table, {}).get(user_id_col.column, "text")
+    else:
+        user_id_type = db_types.get(schema.transactions.table, {}).get(user_id_col or "user_id", "text")
+
+    # Check if direction column is an enum (USER-DEFINED)
+    conv = schema.transactions.amount_convention
+    direction_is_enum = False
+    if conv and conv.direction_column:
+        direction_udt = db_types.get(schema.transactions.table, {}).get(conv.direction_column, "text")
+        direction_is_enum = direction_udt not in ("text", "varchar", "bpchar")
+
+    logger.info("Schema validation passed (user_id_type=%s, direction_is_enum=%s)", user_id_type, direction_is_enum)
+    return ColumnTypeInfo(user_id_type=user_id_type, direction_is_enum=direction_is_enum)
 
 
 async def introspect_schema(conn: Connection, tables: list[str]) -> str:
