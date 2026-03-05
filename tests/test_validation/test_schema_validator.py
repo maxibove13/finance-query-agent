@@ -129,11 +129,14 @@ def postgres_url():
 
         import asyncio
 
+        import asyncpg as _asyncpg
+
         async def _setup():
-            c = Connection(url)
-            await c.connect()
-            await c.execute(_CREATE_TABLES)
-            await c.close()
+            raw = await _asyncpg.connect(url)
+            try:
+                await raw.execute(_CREATE_TABLES)
+            finally:
+                await raw.close()
 
         asyncio.new_event_loop().run_until_complete(_setup())
         yield url
@@ -142,12 +145,17 @@ def postgres_url():
 @pytest.fixture
 async def conn(postgres_url):
     """Create a Connection to the already-initialized test DB."""
+    import finance_query_agent.connection as conn_module
+
+    conn_module._pool = None
     c = Connection(postgres_url)
     await c.connect()
     try:
         yield c
     finally:
-        await c.close()
+        if conn_module._pool is not None:
+            await conn_module._pool.close()
+            conn_module._pool = None
 
 
 class TestValidateSchema:

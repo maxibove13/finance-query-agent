@@ -99,7 +99,7 @@ class TestToolErrorLogging:
         deps = _make_failing_deps()
         ctx = _make_ctx(deps)
         with caplog.at_level(logging.ERROR), pytest.raises(RuntimeError):
-            await get_monthly_totals(ctx, _START, _END)
+            await get_monthly_totals(ctx, start_month=1, start_year=2024, end_month=12, end_year=2024)
         assert any("get_monthly_totals" in r.message for r in caplog.records)
 
     @pytest.mark.asyncio

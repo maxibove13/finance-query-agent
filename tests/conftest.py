@@ -221,12 +221,17 @@ def postgres_url():
 @pytest.fixture
 async def db_connection(postgres_url: str):
     """Provide a connected Connection instance."""
+    import finance_query_agent.connection as conn_module
+
+    conn_module._pool = None
     conn = Connection(postgres_url)
     await conn.connect()
     try:
         yield conn
     finally:
-        await conn.close()
+        if conn_module._pool is not None:
+            await conn_module._pool.close()
+            conn_module._pool = None
 
 
 @pytest.fixture
