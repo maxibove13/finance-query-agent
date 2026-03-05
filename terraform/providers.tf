@@ -9,10 +9,10 @@ terraform {
   }
 
   backend "s3" {
-    bucket         = "my-personal-incomes-ai-tf-state"
+    bucket         = "personal-incomes-terraform-state"
     key            = "finance-query-agent/state.tfstate"
     region         = "us-east-1"
-    dynamodb_table = "terraform-locks"
+    dynamodb_table = "personal-incomes-terraform-locks"
     encrypt        = true
   }
 }
