@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
@@ -51,8 +52,56 @@ class TestResolveSecrets:
     def test_resolve_secrets_skips_without_arns(self) -> None:
         """No ARNs set means no boto3 calls, no errors."""
         s = Settings()
-        # Should not raise or call boto3
         s.resolve_secrets()
+
+    def test_resolve_db_credentials(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        creds = json.dumps(
+            {"username": "ro", "password": "pw", "host": "db.example.com", "port": 5432, "dbname": "mydb"}
+        )
+        monkeypatch.setattr("finance_query_agent.config._resolve_secret", lambda arn: creds)
+
+        s = Settings(db_credentials_secret_arn="arn:aws:secretsmanager:us-east-1:123:secret:db")  # type: ignore[call-arg]
+        s.resolve_secrets()
+        assert s.database_url == "postgresql://ro:pw@db.example.com:5432/mydb"
+
+    def test_resolve_encryption_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        creds = json.dumps({"username": "u", "password": "p", "host": "h", "port": 5432, "dbname": "d"})
+        secrets = {"arn:db": creds, "arn:enc": "fernet-key-123"}
+        monkeypatch.setattr("finance_query_agent.config._resolve_secret", lambda arn: secrets[arn])
+
+        s = Settings(
+            db_credentials_secret_arn="arn:db",  # type: ignore[call-arg]
+            encryption_key_secret_arn="arn:enc",  # type: ignore[call-arg]
+        )
+        s.resolve_secrets()
+        assert s.encryption_key == "fernet-key-123"
+
+    def test_resolve_llm_api_key_sets_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("finance_query_agent.config._resolve_secret", lambda arn: "sk-test-key")
+
+        s = Settings(
+            llm_api_key_secret_arn="arn:llm",  # type: ignore[call-arg]
+            database_url="postgresql://x:x@localhost/db",  # type: ignore[call-arg]
+        )
+        s.resolve_secrets()
+        assert os.environ["OPENAI_API_KEY"] == "sk-test-key"
+
+    def test_resolve_logfire_token_sets_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("finance_query_agent.config._resolve_secret", lambda arn: "lf-token")
+
+        s = Settings(
+            logfire_token_secret_arn="arn:logfire",  # type: ignore[call-arg]
+            database_url="postgresql://x:x@localhost/db",  # type: ignore[call-arg]
+        )
+        s.resolve_secrets()
+        assert os.environ["LOGFIRE_TOKEN"] == "lf-token"
+
+    def test_raises_when_arns_set_but_no_database_url(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("finance_query_agent.config._resolve_secret", lambda arn: "some-key")
+
+        s = Settings(encryption_key_secret_arn="arn:enc")  # type: ignore[call-arg]
+        with pytest.raises(ValueError, match="database_url must be set"):
+            s.resolve_secrets()
 
 
 class TestResolveSSM:
@@ -81,4 +130,4 @@ class TestResolveSSM:
     def test_ssm_not_called_when_param_not_set(self) -> None:
         """When schema_config_ssm_param is None, no SSM call."""
         s = Settings()
-        s.resolve_secrets()  # Should not raise even without boto3
+        s.resolve_secrets()

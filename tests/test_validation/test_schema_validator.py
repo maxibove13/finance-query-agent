@@ -15,6 +15,7 @@ from finance_query_agent.schemas.mapping import (
     TableMapping,
 )
 from finance_query_agent.validation.schema_validator import introspect_schema, validate_schema
+from tests.conftest import skip_without_docker
 
 # SQL to create the test schema matching the spec's sample
 _CREATE_TABLES = """
@@ -122,6 +123,7 @@ def _valid_schema() -> SchemaMapping:
 @pytest.fixture(scope="module")
 def postgres_url():
     """Start a real Postgres container for the module and create tables once."""
+    skip_without_docker()
     with PostgresContainer("postgres:16-alpine") as pg:
         url = pg.get_connection_url().replace("+psycopg2", "")
 
