@@ -1,9 +1,8 @@
-"""Tests for Lambda handler — HTTP envelope and _process_request orchestration."""
+"""Tests for Lambda handler — direct invocation envelope and _process_request orchestration."""
 
 from __future__ import annotations
 
 import asyncio
-import json
 from contextlib import ExitStack
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -15,35 +14,29 @@ from finance_query_agent.handler import _process_request, handler
 
 _PATCH_TARGET = "finance_query_agent.handler._process_request"
 
+_EVENT = {"user_id": "u1", "session_id": "s1", "question": "q"}
 
-# ── Outer handler (HTTP envelope) ───────────────────────────────────────────
+
+# ── Outer handler (direct invocation envelope) ──────────────────────────────
 
 
 class TestHandler:
-    def test_returns_200_on_success(self) -> None:
+    def test_returns_response_on_success(self) -> None:
         mock_response = MagicMock()
-        mock_response.model_dump_json.return_value = json.dumps({"answer": "test"})
+        mock_response.model_dump.return_value = {"answer": "test"}
 
         with patch(_PATCH_TARGET, new_callable=AsyncMock, return_value=mock_response):
-            result = handler(
-                {"body": json.dumps({"user_id": "u1", "session_id": "s1", "question": "q"})},
-                None,
-            )
+            result = handler(_EVENT, None)
 
-        assert result["statusCode"] == 200
-        assert result["headers"]["Content-Type"] == "application/json"
-        body = json.loads(result["body"])
-        assert body["answer"] == "test"
+        assert result["answer"] == "test"
 
-    def test_returns_400_on_missing_field(self) -> None:
+    def test_returns_error_on_missing_field(self) -> None:
         with patch(_PATCH_TARGET, new_callable=AsyncMock, side_effect=KeyError("user_id")):
-            result = handler({"body": "{}"}, None)
+            result = handler({"session_id": "s1"}, None)
 
-        assert result["statusCode"] == 400
-        body = json.loads(result["body"])
-        assert "user_id" in body["error"]
+        assert "user_id" in result["error"]
 
-    def test_returns_503_on_schema_mismatch(self) -> None:
+    def test_returns_error_on_schema_mismatch(self) -> None:
         from finance_query_agent.exceptions import SchemaValidationError
 
         with patch(
@@ -51,26 +44,16 @@ class TestHandler:
             new_callable=AsyncMock,
             side_effect=SchemaValidationError("column 'foo' does not exist on table 'bar'"),
         ):
-            result = handler(
-                {"body": json.dumps({"user_id": "u1", "session_id": "s1", "question": "q"})},
-                None,
-            )
+            result = handler(_EVENT, None)
 
-        assert result["statusCode"] == 503
-        body = json.loads(result["body"])
-        assert body["error"] == "schema_mismatch"
-        assert "foo" in body["message"]
+        assert result["error"] == "schema_mismatch"
+        assert "foo" in result["message"]
 
-    def test_returns_500_on_unexpected_error(self) -> None:
+    def test_returns_error_on_unexpected_error(self) -> None:
         with patch(_PATCH_TARGET, new_callable=AsyncMock, side_effect=RuntimeError("boom")):
-            result = handler(
-                {"body": json.dumps({"user_id": "u1", "session_id": "s1", "question": "q"})},
-                None,
-            )
+            result = handler(_EVENT, None)
 
-        assert result["statusCode"] == 500
-        body = json.loads(result["body"])
-        assert "error" in body
+        assert "error" in result
 
 
 # ── _process_request orchestration ──────────────────────────────────────────

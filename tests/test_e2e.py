@@ -10,7 +10,6 @@ Run:
 
 from __future__ import annotations
 
-import json
 import os
 
 import pytest
@@ -64,15 +63,7 @@ def _env(postgres_url: str, sample_schema_mapping: SchemaMapping):
 
 
 def _make_event(user_id: str, session_id: str, question: str) -> dict:
-    return {
-        "body": json.dumps(
-            {
-                "user_id": user_id,
-                "session_id": session_id,
-                "question": question,
-            }
-        )
-    }
+    return {"user_id": user_id, "session_id": session_id, "question": question}
 
 
 @mock_aws
@@ -85,11 +76,10 @@ def test_e2e_spending_question(_env, dynamodb_table):
         None,
     )
 
-    assert result["statusCode"] == 200
-    body = json.loads(result["body"])
-    assert body["answer"]  # LLM returned something
-    assert body["tool_calls"]  # at least one tool was called
-    assert not body["unresolved"]
+    assert "error" not in result
+    assert result["answer"]  # LLM returned something
+    assert result["tool_calls"]  # at least one tool was called
+    assert not result["unresolved"]
 
 
 @mock_aws
@@ -102,9 +92,8 @@ def test_e2e_multi_currency(_env, dynamodb_table):
         None,
     )
 
-    assert result["statusCode"] == 200
-    body = json.loads(result["body"])
-    answer_lower = body["answer"].lower()
+    assert "error" not in result
+    answer_lower = result["answer"].lower()
     assert "usd" in answer_lower or "uyu" in answer_lower
 
 
@@ -118,7 +107,7 @@ def test_e2e_conversation_memory(_env, dynamodb_table):
         _make_event("test-user-1", "e2e-session-3", "How much did I spend on groceries in October 2025?"),
         None,
     )
-    assert r1["statusCode"] == 200
+    assert "error" not in r1
 
     # Reset agent singleton (simulates new Lambda invocation, same warm container)
     import finance_query_agent.agent as agent_mod
@@ -134,9 +123,8 @@ def test_e2e_conversation_memory(_env, dynamodb_table):
         _make_event("test-user-1", "e2e-session-3", "And how about November?"),
         None,
     )
-    assert r2["statusCode"] == 200
-    body2 = json.loads(r2["body"])
-    assert body2["tool_calls"]  # agent understood the follow-up and called a tool
+    assert "error" not in r2
+    assert r2["tool_calls"]  # agent understood the follow-up and called a tool
 
 
 @mock_aws
@@ -149,10 +137,9 @@ def test_e2e_user_isolation(_env, dynamodb_table):
         None,
     )
 
-    assert result["statusCode"] == 200
-    body = json.loads(result["body"])
+    assert "error" not in result
     # test-user-2 only has one transaction — "Other User Groceries"
-    assert "whole foods" not in body["answer"].lower()
+    assert "whole foods" not in result["answer"].lower()
 
 
 @mock_aws
@@ -160,5 +147,5 @@ def test_e2e_missing_field(_env, dynamodb_table):
     """Missing required field returns 400."""
     from finance_query_agent.handler import handler
 
-    result = handler({"body": json.dumps({"user_id": "x"})}, None)
-    assert result["statusCode"] == 400
+    result = handler({"user_id": "x"}, None)
+    assert "error" in result
