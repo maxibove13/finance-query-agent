@@ -1,2 +1,1 @@
-schema_config_json = "{}"  # Your SchemaMapping JSON
-allowed_origins    = ["https://your-frontend.cloudfront.net"]
+schema_config_json = "{}"  # Seeds SSM parameter on first apply, ignored after

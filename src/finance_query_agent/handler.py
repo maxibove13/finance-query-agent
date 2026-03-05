@@ -1,4 +1,4 @@
-"""Lambda Function URL handler. Synchronous HTTP request-response."""
+"""Lambda handler. Synchronous HTTP request-response."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any
 
+from finance_query_agent.exceptions import SchemaValidationError
 from finance_query_agent.redaction import sanitize_error
 
 if TYPE_CHECKING:
@@ -18,7 +19,7 @@ _initialized: bool = False
 
 
 def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
-    """Lambda Function URL handler. Receives HTTP request, returns HTTP response."""
+    """Lambda handler. Receives HTTP request, returns HTTP response."""
     try:
         body = json.loads(event.get("body", "{}"))
         result = asyncio.run(_process_request(body))
@@ -33,6 +34,18 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             "statusCode": 400,
             "headers": {"Content-Type": "application/json"},
             "body": json.dumps({"error": f"Missing required field: {e}"}),
+        }
+    except SchemaValidationError as e:
+        logger.error("Schema config does not match database: %s", e)
+        return {
+            "statusCode": 503,
+            "headers": {"Content-Type": "application/json"},
+            "body": json.dumps(
+                {
+                    "error": "schema_mismatch",
+                    "message": str(e),
+                }
+            ),
         }
     except Exception as e:
         logger.exception("Agent request failed")
@@ -63,7 +76,7 @@ async def _process_request(body: dict[str, Any]) -> AgentResponse:
     from finance_query_agent.tools import AgentDeps
     from finance_query_agent.validation.schema_validator import validate_schema
 
-    # user_id comes from the authenticated caller (AWS IAM on Function URL)
+    # user_id comes from the authenticated caller
     user_id = body["user_id"]
     session_id = body["session_id"]
     question = body["question"]

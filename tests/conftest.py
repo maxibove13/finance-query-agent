@@ -6,6 +6,7 @@ import asyncio
 
 import asyncpg
 import boto3
+import docker
 import pytest
 from moto import mock_aws
 from testcontainers.postgres import PostgresContainer
@@ -20,6 +21,21 @@ from finance_query_agent.schemas.mapping import (
     SchemaMapping,
     TableMapping,
 )
+
+
+def _docker_available() -> bool:
+    try:
+        docker.from_env().ping()
+        return True
+    except Exception:
+        return False
+
+
+def skip_without_docker() -> None:
+    """Call at the top of any fixture that needs Docker."""
+    if not _docker_available():
+        pytest.skip("Docker not available")
+
 
 # ── Schema Mapping Fixture ──────────────────────────────────────────────────
 
@@ -185,6 +201,7 @@ INSERT INTO credit_card_movements VALUES ('ccm-06', 'cc-1', 'cat-3', '2026-02-10
 @pytest.fixture(scope="session")
 def postgres_url():
     """Start a Postgres container and seed it with test data."""
+    skip_without_docker()
     with PostgresContainer("postgres:16-alpine") as pg:
         url = pg.get_connection_url().replace("postgresql+psycopg2://", "postgresql://")
 

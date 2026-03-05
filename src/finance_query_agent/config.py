@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     dynamodb_region: str = "us-east-1"
     schema_config_json: str | None = None  # inline JSON
     schema_config_path: str | None = None  # path to JSON file
+    schema_config_ssm_param: str | None = None  # SSM parameter name (set via Lambda env var)
     encryption_key: str | None = None  # Fernet key (required in prod)
     logfire_token: str | None = None
     aws_lambda_function_name: str | None = None  # auto-set by Lambda
@@ -37,7 +38,7 @@ class Settings(BaseSettings):
     logfire_token_secret_arn: str | None = None
 
     def resolve_secrets(self) -> None:
-        """Fetch secrets from AWS Secrets Manager if ARN fields are set."""
+        """Fetch secrets from AWS Secrets Manager and SSM Parameter Store."""
         has_arns = any(
             [
                 self.db_credentials_secret_arn,
@@ -46,28 +47,30 @@ class Settings(BaseSettings):
                 self.logfire_token_secret_arn,
             ]
         )
-        if not has_arns:
-            return
+        if has_arns:
+            if self.db_credentials_secret_arn:
+                raw = _resolve_secret(self.db_credentials_secret_arn)
+                creds = json.loads(raw)
+                self.database_url = (
+                    f"postgresql://{creds['username']}:{creds['password']}"
+                    f"@{creds['host']}:{creds.get('port', 5432)}/{creds['dbname']}"
+                )
 
-        if self.db_credentials_secret_arn:
-            raw = _resolve_secret(self.db_credentials_secret_arn)
-            creds = json.loads(raw)
-            self.database_url = (
-                f"postgresql://{creds['username']}:{creds['password']}"
-                f"@{creds['host']}:{creds.get('port', 5432)}/{creds['dbname']}"
-            )
+            if self.encryption_key_secret_arn:
+                self.encryption_key = _resolve_secret(self.encryption_key_secret_arn)
 
-        if self.encryption_key_secret_arn:
-            self.encryption_key = _resolve_secret(self.encryption_key_secret_arn)
+            if self.llm_api_key_secret_arn:
+                os.environ["OPENAI_API_KEY"] = _resolve_secret(self.llm_api_key_secret_arn)
 
-        if self.llm_api_key_secret_arn:
-            os.environ["OPENAI_API_KEY"] = _resolve_secret(self.llm_api_key_secret_arn)
+            if self.logfire_token_secret_arn:
+                os.environ["LOGFIRE_TOKEN"] = _resolve_secret(self.logfire_token_secret_arn)
 
-        if self.logfire_token_secret_arn:
-            os.environ["LOGFIRE_TOKEN"] = _resolve_secret(self.logfire_token_secret_arn)
+            if not self.database_url:
+                raise ValueError("database_url must be set directly or via db_credentials_secret_arn")
 
-        if not self.database_url:
-            raise ValueError("database_url must be set directly or via db_credentials_secret_arn")
+        # SSM-based config (independent of Secrets Manager)
+        if self.schema_config_ssm_param and not self.schema_config_json:
+            self.schema_config_json = _resolve_ssm_parameter(self.schema_config_ssm_param)
 
 
 def _resolve_secret(arn: str) -> str:
@@ -77,6 +80,15 @@ def _resolve_secret(arn: str) -> str:
     client = boto3.client("secretsmanager")
     resp = client.get_secret_value(SecretId=arn)
     return str(resp["SecretString"])
+
+
+def _resolve_ssm_parameter(name: str) -> str:
+    """Fetch a parameter value from AWS SSM Parameter Store."""
+    import boto3
+
+    client = boto3.client("ssm")
+    resp = client.get_parameter(Name=name)
+    return str(resp["Parameter"]["Value"])
 
 
 @lru_cache(maxsize=1)
