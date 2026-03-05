@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import logging
+from unittest.mock import MagicMock
 
 import boto3
 import pytest
@@ -142,3 +144,27 @@ class TestConversationMemory:
         await mem.save_history("user-1", "session-1", updated_msgs)
         response = dynamodb_table.get_item(Key={"PK": "USER#user-1", "SK": "SESSION#session-1"})
         assert response["Item"]["created_at"] == original_created
+
+
+class TestMemoryErrorLogging:
+    async def test_load_history_logs_on_dynamo_error(self, encryptor, caplog):
+        mem = ConversationMemory("test_conversations", "us-east-1", encryptor)
+        mem._table = MagicMock()
+        mem._table.get_item.side_effect = Exception("DynamoDB unreachable")
+        with caplog.at_level(logging.ERROR, logger="finance_query_agent.memory"):
+            with pytest.raises(Exception, match="DynamoDB unreachable"):
+                await mem.load_history("user-1", "session-1")
+        assert "DynamoDB load_history failed" in caplog.text
+        assert "user-1" in caplog.text
+        assert "session-1" in caplog.text
+
+    async def test_save_history_logs_on_dynamo_error(self, encryptor, caplog):
+        mem = ConversationMemory("test_conversations", "us-east-1", encryptor)
+        mem._table = MagicMock()
+        mem._table.update_item.side_effect = Exception("DynamoDB throttled")
+        with caplog.at_level(logging.ERROR, logger="finance_query_agent.memory"):
+            with pytest.raises(Exception, match="DynamoDB throttled"):
+                await mem.save_history("user-1", "session-1", _sample_messages())
+        assert "DynamoDB save_history failed" in caplog.text
+        assert "user-1" in caplog.text
+        assert "session-1" in caplog.text

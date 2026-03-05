@@ -2,12 +2,21 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import asyncpg  # type: ignore[import-untyped]
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+from tenacity import (
+    before_sleep_log,
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from finance_query_agent.exceptions import DatabaseConnectionError, QueryTimeoutError
+
+logger = logging.getLogger(__name__)
 
 
 class Connection:
@@ -21,6 +30,7 @@ class Connection:
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=4),
         retry=retry_if_exception_type((OSError, asyncpg.ConnectionFailureError)),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
         reraise=True,
     )
     async def connect(self) -> None:
@@ -34,6 +44,7 @@ class Connection:
         except (OSError, asyncpg.ConnectionFailureError):
             raise
         except asyncpg.PostgresError as exc:
+            logger.error("Database connection failed: %s", exc)
             raise DatabaseConnectionError(str(exc)) from exc
 
     async def close(self) -> None:
@@ -41,7 +52,10 @@ class Connection:
         if self._conn is not None:
             conn = self._conn
             self._conn = None
-            await conn.close()
+            try:
+                await conn.close()
+            except Exception:
+                logger.error("Failed to close database connection", exc_info=True)
 
     def _get_conn(self) -> Any:
         if self._conn is None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 
 import logfire
@@ -93,8 +94,7 @@ class TestInitialize:
         monkeypatch.delenv("LOGFIRE_TOKEN", raising=False)
         from finance_query_agent.observability import initialize
 
-        # Should not raise
-        initialize()
+        assert initialize() is True
 
     def test_initialize_calls_configure_with_token(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("LOGFIRE_TOKEN", "test-token")
@@ -103,6 +103,36 @@ class TestInitialize:
         with patch("finance_query_agent.observability.logfire") as mock_logfire:
             from finance_query_agent.observability import initialize
 
-            initialize()
+            assert initialize() is True
             mock_logfire.configure.assert_called_once()
             mock_logfire.instrument_pydantic_ai.assert_called_once()
+
+    def test_initialize_logs_and_swallows_configure_error(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        monkeypatch.setenv("LOGFIRE_TOKEN", "test-token")
+        from unittest.mock import patch
+
+        with patch("finance_query_agent.observability.logfire") as mock_logfire:
+            mock_logfire.configure.side_effect = RuntimeError("bad config")
+            from finance_query_agent.observability import initialize
+
+            with caplog.at_level(logging.ERROR, logger="finance_query_agent.observability"):
+                result = initialize()  # should not raise
+        assert result is False
+        assert "Logfire initialization failed" in caplog.text
+
+    def test_initialize_logs_and_swallows_instrument_error(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        monkeypatch.setenv("LOGFIRE_TOKEN", "test-token")
+        from unittest.mock import patch
+
+        with patch("finance_query_agent.observability.logfire") as mock_logfire:
+            mock_logfire.instrument_pydantic_ai.side_effect = RuntimeError("instrument fail")
+            from finance_query_agent.observability import initialize
+
+            with caplog.at_level(logging.ERROR, logger="finance_query_agent.observability"):
+                result = initialize()  # should not raise
+        assert result is False
+        assert "Logfire initialization failed" in caplog.text
