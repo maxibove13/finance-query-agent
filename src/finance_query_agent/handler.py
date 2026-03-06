@@ -16,12 +16,28 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _initialized: bool = False
+_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _get_event_loop() -> asyncio.AbstractEventLoop:
+    """Return a persistent event loop, creating one if needed.
+
+    Unlike asyncio.run() which creates and closes a loop per call,
+    this keeps the loop alive across warm Lambda invocations so cached
+    async resources (connection pools, HTTP clients) remain valid.
+    """
+    global _loop  # noqa: PLW0603
+    if _loop is None or _loop.is_closed():
+        _loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(_loop)
+    return _loop
 
 
 def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     """Lambda handler. Invoked directly via boto3 lambda.invoke()."""
     try:
-        result = asyncio.run(_process_request(event))
+        loop = _get_event_loop()
+        result = loop.run_until_complete(_process_request(event))
         return result.model_dump()
     except KeyError as e:
         logger.warning("Missing required field: %s", e)
