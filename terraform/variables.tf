@@ -4,7 +4,7 @@ variable "project_name" {
 }
 
 # LLM
-variable "llm_model" {
+variable "query_model" {
   type    = string
   default = "openai:gpt-4o"
 }

@@ -83,6 +83,7 @@ async def compare_periods(
             row_count=len(rows),
         )
     )
+    deps.tool_results.append(("compare_periods", results))
     return results
 
 
@@ -134,6 +135,7 @@ async def get_spending_trend(
             row_count=len(rows),
         )
     )
+    deps.tool_results.append(("get_spending_trend", results))
     return results
 
 
@@ -182,4 +184,5 @@ async def get_category_breakdown(
             row_count=len(rows),
         )
     )
+    deps.tool_results.append(("get_category_breakdown", results))
     return results

@@ -121,4 +121,5 @@ async def get_recurring_expenses(
             row_count=len(rows),
         )
     )
+    deps.tool_results.append(("get_recurring_expenses", results))
     return results

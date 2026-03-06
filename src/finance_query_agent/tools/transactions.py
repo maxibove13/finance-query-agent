@@ -97,6 +97,7 @@ async def search_transactions(
             row_count=len(rows),
         )
     )
+    deps.tool_results.append(("search_transactions", result))
     return result
 
 
@@ -148,4 +149,5 @@ async def get_top_merchants(
             row_count=len(rows),
         )
     )
+    deps.tool_results.append(("get_top_merchants", results))
     return results

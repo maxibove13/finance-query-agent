@@ -68,6 +68,7 @@ async def get_spending_by_category(
             row_count=len(rows),
         )
     )
+    deps.tool_results.append(("get_spending_by_category", results))
     return results
 
 
@@ -127,6 +128,7 @@ async def get_monthly_totals(
             row_count=len(rows),
         )
     )
+    deps.tool_results.append(("get_monthly_totals", results))
     return results
 
 
@@ -166,6 +168,7 @@ async def get_balance_summary(
             row_count=len(rows),
         )
     )
+    deps.tool_results.append(("get_balance_summary", results))
     return results
 
 
