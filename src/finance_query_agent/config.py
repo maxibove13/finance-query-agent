@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 class Settings(BaseSettings):
     database_url: str | None = None  # asyncpg: postgresql://... (resolved from secret in Lambda)
     llm_model: str = "openai:gpt-4o"
+    viz_model: str = "openai:gpt-4o-mini"
     dynamodb_table: str = "finance_agent_conversations"
     dynamodb_region: str = "us-east-1"
     schema_config_json: str | None = None  # inline JSON
@@ -27,6 +28,7 @@ class Settings(BaseSettings):
     aws_lambda_function_name: str | None = None  # auto-set by Lambda
 
     # Agent execution limits (30s caller-side budget)
+    request_budget: float = 28.0  # total wall time for entire request (Lambda=30s, leave 2s margin)
     agent_request_limit: int = 7
     agent_per_request_timeout: float = 12.0
     agent_run_timeout: float = 25.0

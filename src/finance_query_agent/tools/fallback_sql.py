@@ -86,6 +86,8 @@ async def run_constrained_query(ctx: RunContext[AgentDeps], sql: str) -> list[di
         )
     )
 
+    deps.tool_results.append(("run_constrained_query", result))
+
     # 7. Audit log
     logger.info(
         "Fallback SQL executed | rows=%d | time_ms=%d | sql=%s",

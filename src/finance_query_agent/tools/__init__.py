@@ -18,5 +18,6 @@ class AgentDeps:
     schema: SchemaMapping
     user_id: Any
     tool_calls: list[ToolCallRecord] = field(default_factory=list)
+    tool_results: list[tuple[str, Any]] = field(default_factory=list)
     fallback_used: bool = False
     fallback_sql: str | None = None

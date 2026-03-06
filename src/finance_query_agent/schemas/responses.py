@@ -6,6 +6,8 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from finance_query_agent.schemas.charts import ChartSpec
+
 
 class ToolCallRecord(BaseModel):
     tool_name: str
@@ -22,6 +24,7 @@ class TokenUsage(BaseModel):
 class AgentResponse(BaseModel):
     answer: str
     tool_calls: list[ToolCallRecord]
+    visualizations: list[ChartSpec] | None = None
     fallback_used: bool
     fallback_sql: str | None
     unresolved: bool

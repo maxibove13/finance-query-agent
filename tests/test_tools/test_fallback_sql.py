@@ -31,6 +31,7 @@ class FakeDeps:
     schema: SchemaMapping
     user_id: str
     tool_calls: list[ToolCallRecord] = field(default_factory=list)
+    tool_results: list[tuple[str, Any]] = field(default_factory=list)
     fallback_used: bool = False
     fallback_sql: str | None = None
     query_builder: Any = None

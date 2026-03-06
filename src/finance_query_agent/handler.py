@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import TYPE_CHECKING, Any
 
 from finance_query_agent.exceptions import SchemaValidationError
@@ -50,6 +51,8 @@ async def _process_request(body: dict[str, Any]) -> AgentResponse:
     from finance_query_agent.schemas.responses import AgentResponse, TokenUsage
     from finance_query_agent.tools import AgentDeps
     from finance_query_agent.validation.schema_validator import validate_schema
+
+    request_start = time.monotonic()
 
     raw_user_id = body["user_id"]
     session_id = body["session_id"]
@@ -130,11 +133,31 @@ async def _process_request(body: dict[str, Any]) -> AgentResponse:
         # Store updated conversation (DynamoDB always uses string keys)
         await memory.save_history(str(raw_user_id), session_id, result.all_messages())
 
+        # Generate visualizations (best-effort, non-fatal)
+        from finance_query_agent.visualization import generate_visualizations
+
+        visualizations = None
+        elapsed = time.monotonic() - request_start
+        viz_budget = settings.request_budget - elapsed - 1.0  # 1s reserve for response serialization
+        if deps.tool_results and viz_budget > 0.5:
+            try:
+                visualizations = await asyncio.wait_for(
+                    generate_visualizations(
+                        question=question,
+                        tool_results=deps.tool_results,
+                        model=settings.viz_model,
+                    ),
+                    timeout=viz_budget,
+                )
+            except TimeoutError:
+                logger.warning("Visualization timed out (budget=%.1fs)", viz_budget)
+
         # Build response
         usage = result.usage()
         return AgentResponse(
             answer=result.output,
             tool_calls=deps.tool_calls,
+            visualizations=visualizations,
             fallback_used=deps.fallback_used,
             fallback_sql=deps.fallback_sql,
             unresolved=not deps.tool_calls and not deps.fallback_used,
