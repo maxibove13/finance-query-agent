@@ -1,0 +1,52 @@
+{
+  "transactions": {
+    "table": "account_movements",
+    "columns": {
+      "date": "issued_at",
+      "amount": "amount",
+      "description": "description",
+      "user_id": {"table": "accounts", "column": "user_id"},
+      "currency": {"table": "accounts", "column": "currency"},
+      "account_id": "account_id",
+      "balance": "balance"
+    },
+    "joins": [
+      {"table": "accounts", "on": "account_movements.account_id = accounts.id", "type": "inner"},
+      {"table": "tags", "on": "account_movements.category_id = tags.id", "type": "left"}
+    ],
+    "amount_convention": {
+      "direction_column": "movement_direction",
+      "expense_value": "debit",
+      "income_value": "credit"
+    }
+  },
+  "categories": {
+    "table": "tags",
+    "columns": {"id": "id", "name": "name"},
+    "user_scoped": false
+  },
+  "accounts": {
+    "table": "accounts",
+    "columns": {"id": "id", "user_id": "user_id", "name": "alias"}
+  },
+  "secondary_transactions": {
+    "table": "credit_card_movements",
+    "columns": {
+      "date": "issued_at",
+      "amount": "amount",
+      "description": "description",
+      "user_id": {"table": "credit_cards", "column": "user_id"},
+      "currency": "currency",
+      "account_id": "credit_card_id"
+    },
+    "joins": [
+      {"table": "credit_cards", "on": "credit_card_movements.credit_card_id = credit_cards.id", "type": "inner"},
+      {"table": "tags", "on": "credit_card_movements.category_id = tags.id", "type": "left"}
+    ],
+    "amount_convention": {
+      "direction_column": "movement_direction",
+      "expense_value": "debit",
+      "income_value": "credit"
+    }
+  }
+}

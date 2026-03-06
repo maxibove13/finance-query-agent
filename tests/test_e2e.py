@@ -30,11 +30,11 @@ def _reset_singletons():
     import finance_query_agent.config as config_mod
     import finance_query_agent.handler as handler_mod
 
-    agent_mod._agent = None
+    agent_mod._agents.clear()
     handler_mod._initialized = False
     config_mod.get_settings.cache_clear()
     yield
-    agent_mod._agent = None
+    agent_mod._agents.clear()
     handler_mod._initialized = False
     config_mod.get_settings.cache_clear()
 
@@ -46,7 +46,7 @@ def _env(postgres_url: str, sample_schema_mapping: SchemaMapping):
     env = {
         "DATABASE_URL": postgres_url,
         "SCHEMA_CONFIG_JSON": schema_json,
-        "LLM_MODEL": "openai:gpt-4o-mini",
+        "QUERY_MODEL": "openai:gpt-4o-mini",
         "DYNAMODB_TABLE": "test-conversations",
         "DYNAMODB_REGION": "us-east-1",
     }
@@ -114,7 +114,7 @@ def test_e2e_conversation_memory(_env, dynamodb_table):
     import finance_query_agent.config as config_mod
     import finance_query_agent.handler as handler_mod
 
-    agent_mod._agent = None
+    agent_mod._agents.clear()
     handler_mod._initialized = False
     config_mod.get_settings.cache_clear()
 

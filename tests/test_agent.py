@@ -29,10 +29,10 @@ class TestBuildSystemPrompt:
 
 class TestGetAgent:
     def setup_method(self) -> None:
-        agent_module._agent = None
+        agent_module._agents.clear()
 
     def teardown_method(self) -> None:
-        agent_module._agent = None
+        agent_module._agents.clear()
 
     def test_returns_agent_with_all_tools(self) -> None:
         agent = get_agent(_TEST_MODEL)

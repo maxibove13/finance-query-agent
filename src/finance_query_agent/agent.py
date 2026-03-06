@@ -5,18 +5,19 @@ from __future__ import annotations
 import datetime
 
 from pydantic_ai import Agent, RunContext
+from pydantic_ai.models import Model
 
 from finance_query_agent.history import summarize_history
 from finance_query_agent.tools import AgentDeps
 
-_agent: Agent[AgentDeps, str] | None = None
+_agents: dict[str, Agent[AgentDeps, str]] = {}
 
 
-def get_agent(model: str) -> Agent[AgentDeps, str]:
-    """Singleton agent factory. Created once, reused across warm Lambda invocations."""
-    global _agent
-    if _agent is not None:
-        return _agent
+def get_agent(model: str | Model) -> Agent[AgentDeps, str]:
+    """Cached agent factory, keyed by model. Reused across warm Lambda invocations."""
+    key = str(model)
+    if key in _agents:
+        return _agents[key]
 
     # Import tools here to avoid circular imports at module level
     from pydantic_ai import Tool
@@ -32,7 +33,7 @@ def get_agent(model: str) -> Agent[AgentDeps, str]:
     from finance_query_agent.tools.transactions import get_top_merchants, search_transactions
     from finance_query_agent.tools.trends import compare_periods, get_category_breakdown, get_spending_trend
 
-    _agent = Agent(
+    agent = Agent(
         model,
         deps_type=AgentDeps,
         tools=[
@@ -51,11 +52,12 @@ def get_agent(model: str) -> Agent[AgentDeps, str]:
         history_processors=[summarize_history],
     )
 
-    @_agent.system_prompt(dynamic=True)
+    @agent.system_prompt(dynamic=True)
     async def system_prompt(ctx: RunContext[AgentDeps]) -> str:
         return build_system_prompt()
 
-    return _agent
+    _agents[key] = agent
+    return agent
 
 
 def build_system_prompt() -> str:
