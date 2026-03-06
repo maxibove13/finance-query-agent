@@ -2,7 +2,44 @@
 
 AI-powered financial query agent. Answers natural language questions about spending, income, and transactions. Deployed as an AWS Lambda invoked by MPI's backend via `boto3 lambda.invoke()`.
 
-Uses a **tools-as-wrappers** architecture: the LLM picks a tool and fills parameters, the service generates and executes parameterized SQL. No raw SQL from the LLM for the common case — a constrained SQL fallback covers the long tail.
+Uses a **tools-as-wrappers** architecture: the LLM picks a tool and fills parameters, the service generates and executes parameterized SQL. No raw SQL from the LLM for the common case — a constrained SQL fallback covers the long tail. A secondary **visualization agent** generates chart specs from query results when the data is chartable.
+
+```mermaid
+graph LR
+    Q["User Question"] --> QUERY_AGENT
+
+    subgraph QUERY_AGENT["Query Agent (Pydantic AI)"]
+        direction TB
+        subgraph PREDEFINED["Predefined Tools"]
+            direction LR
+            S["get_spending_by_category\nget_monthly_totals\nget_balance_summary"]
+            T["search_transactions\nget_top_merchants"]
+            R["compare_periods\nget_spending_trend\nget_category_breakdown"]
+            P["get_recurring_expenses"]
+        end
+        FB["run_constrained_query\n(SQL fallback)"]
+    end
+
+    QUERY_AGENT -->|"TextAnswer"| OUT_TEXT["Text Response"]
+    QUERY_AGENT -->|"AnswerWithVisualization"| VIZ_AGENT
+
+    subgraph VIZ_AGENT["Visualization Agent"]
+        direction TB
+        VIZ_IN["Chartable tool results\n(≥ 2 rows)"]
+        VIZ_OUT["pie · bar · line · grouped_bar"]
+    end
+
+    VIZ_AGENT --> OUT_VIZ["Text + Chart Specs"]
+
+    PREDEFINED --> QB["QueryBuilder\n(SchemaMapping → SQL)"]
+    QB --> PG[("PostgreSQL")]
+    FB --> PG
+
+    style QUERY_AGENT fill:#2a2a3c,stroke:#88c,color:#fff
+    style PREDEFINED fill:#2d5a3d,stroke:#4a9,color:#fff
+    style FB fill:#5a3d2d,stroke:#a94,color:#fff
+    style VIZ_AGENT fill:#3a3a5c,stroke:#88c,color:#fff
+```
 
 ## Request Lifecycle
 
@@ -28,14 +65,18 @@ sequenceDiagram
     PG-->>Lambda: Query results
 
     Lambda->>LLM: Tool results
-    LLM-->>Lambda: "You spent $235.50 on groceries"
+    LLM-->>Lambda: AnswerWithVisualization
+
+    Note over Lambda: Viz agent runs if chartable data ≥ 2 rows
+    Lambda->>LLM: Viz agent: question + tool results
+    LLM-->>Lambda: ChartSpec[]
 
     Lambda->>Dynamo: Save updated history (encrypted)
-    Lambda-->>Backend: AgentResponse JSON
-    Backend-->>Client: Answer + metadata
+    Lambda-->>Backend: AgentResponse JSON (answer + charts)
+    Backend-->>Client: Answer + visualizations
 ```
 
-## Architecture Overview
+## Architecture
 
 ```mermaid
 graph TB
@@ -51,7 +92,7 @@ graph TB
         subgraph Lambda["Lambda (30s timeout)"]
             HANDLER[handler.py<br/><i>Entry point</i>]
             HANDLER --> AGENT
-            AGENT[Pydantic AI Agent<br/><i>agent.py</i>]
+            AGENT[Query Agent<br/><i>agent.py</i>]
             AGENT --> TOOLS
             AGENT --> FALLBACK
 
@@ -68,26 +109,30 @@ graph TB
             end
 
             FALLBACK[run_constrained_query<br/><i>SQL fallback</i>]
-
             QB[QueryBuilder<br/><i>SchemaMapping → SQL</i>]
             TOOLS --> QB
+
+            AGENT -->|AnswerWithVisualization| VIZ
+            VIZ[Visualization Agent<br/><i>visualization.py</i>]
         end
 
         RDS[(RDS PostgreSQL<br/><i>read-only role</i>)]
         DDB[(DynamoDB<br/><i>conversation memory</i>)]
     end
 
-    LLM_API[LLM API<br/><i>OpenAI / Anthropic</i>]
+    LLM_API[LLM API<br/><i>OpenAI</i>]
     LOGFIRE[Logfire<br/><i>PII-scrubbed traces</i>]
 
     QB -->|parameterized queries| RDS
     FALLBACK -->|validated SQL| RDS
     HANDLER <-->|encrypted history| DDB
     AGENT <-->|inference| LLM_API
+    VIZ <-->|inference| LLM_API
     HANDLER -.->|traces| LOGFIRE
 
     style TOOLS fill:#2d5a3d,stroke:#4a9,color:#fff
     style FALLBACK fill:#5a3d2d,stroke:#a94,color:#fff
+    style VIZ fill:#3a3a5c,stroke:#88c,color:#fff
     style RDS fill:#1a3a5c,stroke:#4a9,color:#fff
     style DDB fill:#1a3a5c,stroke:#4a9,color:#fff
 ```
@@ -146,7 +191,7 @@ graph LR
         PARAMS["Params: ['user-123', '2026-02-01', '2026-02-28']"]
     end
 
-    GQ -->|single connection| PG[(PostgreSQL)]
+    GQ -->|connection pool| PG[(PostgreSQL)]
     PG --> ROWS[Result Rows]
     ROWS --> LLM[LLM formats answer]
 
@@ -274,6 +319,14 @@ Response:
 {
   "answer": "You spent $235.50 on groceries last month across 3 transactions.",
   "tool_calls": [...],
+  "visualizations": [
+    {
+      "chart_type": "pie",
+      "title": "Spending by Category (USD)",
+      "currency": "USD",
+      "slices": [{"label": "Groceries", "value": 235.50, "percentage": 42.1}, ...]
+    }
+  ],
   "fallback_used": false,
   "unresolved": false,
   "original_question": "How much did I spend on groceries last month?",
@@ -281,15 +334,18 @@ Response:
 }
 ```
 
+`visualizations` is `null` when the query agent returns `TextAnswer` or the data isn't chartable. Chart types: `pie`, `bar`, `line`, `grouped_bar`.
+
 ## Project Structure
 
 ```
 src/finance_query_agent/
 ├── handler.py              Lambda entry point
-├── agent.py                Pydantic AI agent + system prompt
+├── agent.py                Query agent + system prompt
+├── visualization.py        Visualization agent (chart spec generation)
 ├── config.py               Settings from env vars
 ├── query_builder.py        SchemaMapping → parameterized SQL
-├── connection.py           asyncpg single connection (Lambda-aware)
+├── connection.py           asyncpg pool (cached, Lambda-aware)
 ├── memory.py               DynamoDB conversation history
 ├── encryption.py           Fernet field encryption
 ├── redaction.py            Regex PII scrubbing
@@ -307,9 +363,10 @@ src/finance_query_agent/
 │   └── schema_validator.py Validates mapping against live DB
 └── schemas/
     ├── mapping.py          SchemaMapping, TableMapping, JoinDef, ColumnRef
+    ├── charts.py           Chart specs (pie, bar, line, grouped_bar)
     ├── tool_params.py      Tool input parameter models
     ├── tool_results.py     Tool return type models
-    └── responses.py        AgentResponse, ToolCallRecord, TokenUsage
+    └── responses.py        AgentResponse, AgentOutput, ChartSpec
 ```
 
 ## Development
