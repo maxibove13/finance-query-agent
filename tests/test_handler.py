@@ -82,7 +82,7 @@ def _build_mocks() -> dict:
     settings.encryption_key = None
     settings.dynamodb_table = "t"
     settings.dynamodb_region = "us-east-1"
-    settings.llm_model = "test:m"
+    settings.agent_model = "test:m"
     settings.agent_request_limit = 7
     settings.agent_per_request_timeout = 12.0
     settings.agent_run_timeout = 25.0

@@ -99,7 +99,7 @@ async def _process_request(body: dict[str, Any]) -> AgentResponse:
 
         qb = QueryBuilder(schema)
         deps = AgentDeps(connection=conn, query_builder=qb, schema=schema, user_id=user_id)
-        agent = get_agent(settings.llm_model)
+        agent = get_agent(settings.agent_model)
 
         usage_limits = UsageLimits(request_limit=settings.agent_request_limit)
         model_settings = ModelSettings(timeout=settings.agent_per_request_timeout)
