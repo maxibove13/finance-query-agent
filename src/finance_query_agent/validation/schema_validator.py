@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 from finance_query_agent.connection import Connection
 from finance_query_agent.exceptions import SchemaValidationError
-from finance_query_agent.schemas.mapping import ColumnRef, SchemaMapping, TableMapping
+from finance_query_agent.schemas.mapping import AmountConvention, ColumnRef, SchemaMapping, TableMapping
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +89,27 @@ def _validate_table_mapping(
             )
 
 
+async def _validate_enum_labels(
+    conn: Connection,
+    mapping_name: str,
+    enum_type_name: str,
+    conv: AmountConvention,
+    errors: list[str],
+) -> None:
+    """Check that config expense_value/income_value exist in the Postgres enum."""
+    enum_rows = await conn.fetch(
+        "SELECT e.enumlabel FROM pg_enum e JOIN pg_type t ON e.enumtypid = t.oid WHERE t.typname = $1",
+        enum_type_name,
+    )
+    labels = {row["enumlabel"] for row in enum_rows}
+    for field, val in [("expense_value", conv.expense_value), ("income_value", conv.income_value)]:
+        if val and val not in labels:
+            errors.append(
+                f"{mapping_name}.amount_convention.{field}: '{val}' not found in "
+                f"enum '{enum_type_name}' (valid: {sorted(labels)})"
+            )
+
+
 async def validate_schema(schema: SchemaMapping, conn: Connection) -> ColumnTypeInfo:
     """Validate that all mapped tables and columns exist in the live database.
 
@@ -122,6 +143,21 @@ async def validate_schema(schema: SchemaMapping, conn: Connection) -> ColumnType
     if conv and conv.direction_column:
         direction_udt = db_types.get(schema.transactions.table, {}).get(conv.direction_column, "text")
         direction_is_enum = direction_udt not in ("text", "varchar", "bpchar")
+
+    # Validate enum labels match config values (catches case mismatches early)
+    if direction_is_enum and conv:
+        await _validate_enum_labels(conn, "transactions", direction_udt, conv, errors)
+
+    if schema.secondary_transactions and schema.secondary_transactions.amount_convention:
+        sec_conv = schema.secondary_transactions.amount_convention
+        if sec_conv.direction_column:
+            sec_udt = db_types.get(schema.secondary_transactions.table, {}).get(sec_conv.direction_column, "text")
+            sec_is_enum = sec_udt not in ("text", "varchar", "bpchar")
+            if sec_is_enum:
+                await _validate_enum_labels(conn, "secondary_transactions", sec_udt, sec_conv, errors)
+
+    if errors:
+        raise SchemaValidationError("Schema validation failed:\n  - " + "\n  - ".join(errors))
 
     logger.info("Schema validation passed (user_id_type=%s, direction_is_enum=%s)", user_id_type, direction_is_enum)
     return ColumnTypeInfo(user_id_type=user_id_type, direction_is_enum=direction_is_enum)

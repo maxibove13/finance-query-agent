@@ -446,7 +446,7 @@ Configuration is via environment variables (set by Terraform):
 | Variable | Description |
 |----------|-------------|
 | `SCHEMA_CONFIG_SSM_PARAM` | SSM parameter name for SchemaMapping JSON (set by Terraform) |
-| `LLM_MODEL` | Pydantic AI model string (default: `openai:gpt-4o`) |
+| `QUERY_MODEL` | Pydantic AI model string (default: `openai:gpt-4o`) |
 | `DYNAMODB_TABLE` | DynamoDB table for conversation memory |
 | `DB_CREDENTIALS_SECRET_ARN` | Secrets Manager ARN for DB credentials |
 | `ENCRYPTION_KEY_SECRET_ARN` | Secrets Manager ARN for Fernet key |

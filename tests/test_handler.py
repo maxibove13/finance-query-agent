@@ -11,6 +11,7 @@ from pydantic_ai.exceptions import UsageLimitExceeded
 
 import finance_query_agent.handler as handler_module
 from finance_query_agent.handler import _process_request, handler
+from finance_query_agent.schemas.responses import AnswerWithVisualization, TextAnswer
 from finance_query_agent.validation.schema_validator import ColumnTypeInfo
 
 _PATCH_TARGET = "finance_query_agent.handler._process_request"
@@ -70,7 +71,7 @@ def _build_mocks() -> dict:
 
     usage = MagicMock(input_tokens=100, output_tokens=50)
     result = MagicMock()
-    result.output = "The answer is 42"
+    result.output = TextAnswer(answer="The answer is 42")
     result.all_messages.return_value = [{"role": "user", "content": "q"}]
     result.usage.return_value = usage
 
@@ -86,6 +87,8 @@ def _build_mocks() -> dict:
     settings.agent_request_limit = 7
     settings.agent_per_request_timeout = 12.0
     settings.agent_run_timeout = 25.0
+    settings.request_budget = 28.0
+    settings.viz_model = "test:viz"
 
     targets = {
         "finance_query_agent.observability.initialize": MagicMock(),
@@ -257,3 +260,89 @@ class TestProcessRequest:
 
         kwargs = mocks["agent"].run.call_args.kwargs
         assert kwargs["model_settings"]["timeout"] == 12.0
+
+    @pytest.mark.asyncio()
+    async def test_text_answer_skips_visualization(self, mocks: dict) -> None:
+        """TextAnswer output should never trigger the viz pipeline."""
+        # result.output is already TextAnswer from _build_mocks
+        with ExitStack() as stack:
+            _apply(stack, mocks["targets"])
+            viz_mock = stack.enter_context(
+                patch("finance_query_agent.visualization.generate_visualizations", new_callable=AsyncMock)
+            )
+            resp = await _process_request(_BODY)
+
+        assert resp.visualizations is None
+        viz_mock.assert_not_awaited()
+
+    @pytest.mark.asyncio()
+    async def test_answer_with_viz_triggers_visualization(self, mocks: dict) -> None:
+        """AnswerWithVisualization output + chartable data should trigger viz."""
+        result_mock = mocks["agent"].run.return_value
+        result_mock.output = AnswerWithVisualization(answer="Here's your breakdown")
+
+        # Make agent.run populate tool_results on deps
+        original_return = result_mock
+
+        async def _run_with_results(*args, **kwargs):
+            deps = kwargs["deps"]
+            deps.tool_results = [("get_spending_by_category", ["a", "b"])]
+            return original_return
+
+        mocks["agent"].run = AsyncMock(side_effect=_run_with_results)
+
+        from finance_query_agent.schemas.charts import PieChartSpec
+
+        chart = PieChartSpec(
+            title="Test",
+            currency="USD",
+            slices=[
+                {"label": "A", "value": 60.0, "percentage": 60.0},
+                {"label": "B", "value": 40.0, "percentage": 40.0},
+            ],
+        )
+
+        with ExitStack() as stack:
+            _apply(stack, mocks["targets"])
+            stack.enter_context(patch("finance_query_agent.visualization.should_visualize", return_value=True))
+            stack.enter_context(
+                patch(
+                    "finance_query_agent.visualization.generate_visualizations",
+                    new_callable=AsyncMock,
+                    return_value=[chart],
+                )
+            )
+            resp = await _process_request(_BODY)
+
+        assert resp.answer == "Here's your breakdown"
+        assert resp.visualizations is not None
+        assert len(resp.visualizations) == 1
+
+    @pytest.mark.asyncio()
+    async def test_answer_with_viz_skips_when_guardrails_fail(self, mocks: dict) -> None:
+        """AnswerWithVisualization but non-chartable data should not trigger viz."""
+        result_mock = mocks["agent"].run.return_value
+        result_mock.output = AnswerWithVisualization(answer="No chart for you")
+
+        original_return = result_mock
+
+        async def _run_with_results(*args, **kwargs):
+            deps = kwargs["deps"]
+            deps.tool_results = [("search_transactions", ["a", "b"])]
+            return original_return
+
+        mocks["agent"].run = AsyncMock(side_effect=_run_with_results)
+
+        with ExitStack() as stack:
+            _apply(stack, mocks["targets"])
+            viz_mock = stack.enter_context(
+                patch(
+                    "finance_query_agent.visualization.generate_visualizations",
+                    new_callable=AsyncMock,
+                )
+            )
+            resp = await _process_request(_BODY)
+
+        assert resp.answer == "No chart for you"
+        assert resp.visualizations is None
+        viz_mock.assert_not_awaited()

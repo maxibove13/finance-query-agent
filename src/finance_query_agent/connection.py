@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -21,6 +22,13 @@ logger = logging.getLogger(__name__)
 _pool: asyncpg.Pool | None = None
 
 
+def _pool_is_usable(pool: asyncpg.Pool) -> bool:
+    """Check if a cached pool is open and belongs to the current event loop."""
+    if pool._closing or pool._closed:
+        return False
+    return pool._loop is asyncio.get_running_loop()
+
+
 class Connection:
     """Asyncpg pool wrapper. The pool is cached at module level across warm Lambda invocations."""
 
@@ -38,9 +46,14 @@ class Connection:
     async def connect(self) -> None:
         """Create or reuse the module-level connection pool."""
         global _pool  # noqa: PLW0603
-        if _pool is not None and not _pool._closing and not _pool._closed:
+        if _pool is not None and _pool_is_usable(_pool):
             self._pool = _pool
             return
+        # Stale pool from a previous event loop — terminate its connections.
+        if _pool is not None:
+            logger.info("Terminating stale connection pool (loop mismatch)")
+            _pool.terminate()
+            _pool = None
         try:
             _pool = await asyncpg.create_pool(
                 self._db_url,

@@ -9,6 +9,21 @@ from pydantic import BaseModel
 from finance_query_agent.schemas.charts import ChartSpec
 
 
+class TextAnswer(BaseModel):
+    """Text-only answer."""
+
+    answer: str
+
+
+class AnswerWithVisualization(BaseModel):
+    """Text answer with a request for chart generation from the tool results."""
+
+    answer: str
+
+
+AgentOutput = TextAnswer | AnswerWithVisualization
+
+
 class ToolCallRecord(BaseModel):
     tool_name: str
     parameters: dict[str, Any]

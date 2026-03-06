@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from unittest.mock import AsyncMock, PropertyMock, patch
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import asyncpg
 import pytest
@@ -30,6 +31,8 @@ def _make_mock_pool():
     pool = AsyncMock()
     type(pool)._closing = PropertyMock(return_value=False)
     type(pool)._closed = PropertyMock(return_value=False)
+    pool._loop = asyncio.get_event_loop()
+    pool.terminate = MagicMock()  # terminate() is sync, not async
     return pool
 
 
@@ -56,6 +59,19 @@ class TestConnect:
             await conn.connect()
             mock_create.assert_not_called()
         assert conn._pool is mock_pool
+
+    async def test_connect_recreates_pool_on_loop_mismatch(self, conn):
+        """Pool from a previous event loop (e.g. prior asyncio.run()) is terminated and replaced."""
+        stale_pool = _make_mock_pool()
+        stale_pool._loop = asyncio.new_event_loop()  # different loop
+        conn_module._pool = stale_pool
+
+        new_pool = _make_mock_pool()
+        with patch("finance_query_agent.connection.asyncpg.create_pool", AsyncMock(return_value=new_pool)):
+            await conn.connect()
+        stale_pool.terminate.assert_called_once()
+        assert conn._pool is new_pool
+        assert conn_module._pool is new_pool
 
     async def test_connect_recreates_closed_pool(self, conn):
         old_pool = _make_mock_pool()
