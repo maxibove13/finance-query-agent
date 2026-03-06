@@ -207,6 +207,34 @@ class TestBuildMonthlyTotals:
         q = qb.build_monthly_totals("u1", date(2024, 1, 1), date(2024, 6, 30))
         assert "debit" in q.params
 
+    def test_direction_value_passed_verbatim(self):
+        """Expense/income values from config are passed as-is -- config must match the DB."""
+        schema = SchemaMapping(
+            transactions=TableMapping(
+                table="movements",
+                columns={
+                    "date": "issued_at",
+                    "amount": "amount",
+                    "description": "description",
+                    "user_id": "user_id",
+                    "currency": "currency",
+                    "account_id": "account_id",
+                },
+                joins=[JoinDef(table="tags", on="movements.category_id = tags.id", type="left")],
+                amount_convention=AmountConvention(
+                    direction_column="movement_direction",
+                    expense_value="DEBIT",
+                    income_value="CREDIT",
+                ),
+            ),
+            categories=TableMapping(table="tags", columns={"id": "id", "name": "name"}, user_scoped=False),
+            accounts=TableMapping(table="accounts", columns={"id": "id", "user_id": "user_id"}),
+        )
+        qb = QueryBuilder(schema)
+        q = qb.build_monthly_totals("u1", date(2024, 1, 1), date(2024, 6, 30))
+        assert "DEBIT" in q.params
+        assert "movements.movement_direction::text" in q.sql
+
 
 # ── Top merchants ─────────────────────────────────────────────────
 

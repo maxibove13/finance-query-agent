@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from finance_query_agent.config import Settings, load_schema_json
+from finance_query_agent.config import Settings, _resolve_secret, _resolve_ssm_parameter, load_schema_json
 
 
 class TestLoadFromEnv:
@@ -134,3 +136,25 @@ class TestResolveSSM:
         """When schema_config_ssm_param is None, no SSM call."""
         s = Settings()
         s.resolve_secrets()
+
+
+class TestResolveSecretLogging:
+    def test_logs_on_secrets_manager_error(self, caplog: pytest.LogCaptureFixture) -> None:
+        mock_client = MagicMock()
+        mock_client.get_secret_value.side_effect = Exception("AccessDenied")
+        with patch("boto3.client", return_value=mock_client):
+            with caplog.at_level(logging.ERROR, logger="finance_query_agent.config"):
+                with pytest.raises(Exception, match="AccessDenied"):
+                    _resolve_secret("arn:aws:secretsmanager:us-east-1:123:secret:test")
+        assert "Failed to resolve secret" in caplog.text
+        assert "arn:aws:secretsmanager:us-east-1:123:secret:test" in caplog.text
+
+    def test_logs_on_ssm_error(self, caplog: pytest.LogCaptureFixture) -> None:
+        mock_client = MagicMock()
+        mock_client.get_parameter.side_effect = Exception("ParameterNotFound")
+        with patch("boto3.client", return_value=mock_client):
+            with caplog.at_level(logging.ERROR, logger="finance_query_agent.config"):
+                with pytest.raises(Exception, match="ParameterNotFound"):
+                    _resolve_ssm_parameter("/test/param")
+        assert "Failed to resolve SSM parameter" in caplog.text
+        assert "/test/param" in caplog.text

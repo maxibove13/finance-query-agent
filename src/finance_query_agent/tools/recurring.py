@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import statistics
 import time
 from datetime import date
@@ -13,6 +14,8 @@ from pydantic_ai import RunContext
 from finance_query_agent.schemas.responses import ToolCallRecord
 from finance_query_agent.schemas.tool_results import RecurringExpense
 from finance_query_agent.tools import AgentDeps
+
+logger = logging.getLogger(__name__)
 
 # Frequency classification ranges (median interval in days)
 _FREQUENCY_RANGES: list[tuple[int, int, str]] = [
@@ -97,7 +100,11 @@ async def get_recurring_expenses(
     )
 
     start = time.monotonic()
-    rows = await deps.connection.fetch(query.sql, *query.params)
+    try:
+        rows = await deps.connection.fetch(query.sql, *query.params)
+    except Exception:
+        logger.error("Tool '%s' query failed | sql=%s", "get_recurring_expenses", query.sql)
+        raise
     elapsed_ms = int((time.monotonic() - start) * 1000)
 
     results = _process_recurring_rows(rows)

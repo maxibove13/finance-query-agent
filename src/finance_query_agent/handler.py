@@ -63,8 +63,8 @@ async def _process_request(body: dict[str, Any]) -> AgentResponse:
     if not _initialized:
         from finance_query_agent.observability import initialize
 
-        initialize()
-        _initialized = True
+        _initialized = initialize()
+
     encryptor = FieldEncryptor(settings.encryption_key)
     memory = ConversationMemory(settings.dynamodb_table, settings.dynamodb_region, encryptor)
     assert settings.database_url is not None, "database_url must be set"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import calendar
+import logging
 import time
 from datetime import date
 
@@ -16,6 +17,8 @@ from finance_query_agent.schemas.tool_results import (
     MonthlyTotal,
 )
 from finance_query_agent.tools import AgentDeps
+
+logger = logging.getLogger(__name__)
 
 
 async def get_spending_by_category(
@@ -35,7 +38,11 @@ async def get_spending_by_category(
         account_id=account_id,
     )
     start = time.monotonic()
-    rows = await deps.connection.fetch(query.sql, *query.params)
+    try:
+        rows = await deps.connection.fetch(query.sql, *query.params)
+    except Exception:
+        logger.error("Tool '%s' query failed | sql=%s", "get_spending_by_category", query.sql)
+        raise
     elapsed_ms = int((time.monotonic() - start) * 1000)
 
     results = [
@@ -89,7 +96,11 @@ async def get_monthly_totals(
         account_id=account_id,
     )
     start = time.monotonic()
-    rows = await deps.connection.fetch(query.sql, *query.params)
+    try:
+        rows = await deps.connection.fetch(query.sql, *query.params)
+    except Exception:
+        logger.error("Tool '%s' query failed | sql=%s", "get_monthly_totals", query.sql)
+        raise
     elapsed_ms = int((time.monotonic() - start) * 1000)
 
     results = [
@@ -132,7 +143,11 @@ async def get_balance_summary(
         account_id=account_id,
     )
     start = time.monotonic()
-    rows = await deps.connection.fetch(query.sql, *query.params)
+    try:
+        rows = await deps.connection.fetch(query.sql, *query.params)
+    except Exception:
+        logger.error("Tool '%s' query failed | sql=%s", "get_balance_summary", query.sql)
+        raise
     elapsed_ms = int((time.monotonic() - start) * 1000)
 
     results = [

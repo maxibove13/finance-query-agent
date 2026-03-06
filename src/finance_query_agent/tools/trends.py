@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from datetime import date
 from decimal import Decimal
@@ -16,6 +17,8 @@ from finance_query_agent.schemas.tool_results import (
     TrendPoint,
 )
 from finance_query_agent.tools import AgentDeps
+
+logger = logging.getLogger(__name__)
 
 
 async def compare_periods(
@@ -38,7 +41,11 @@ async def compare_periods(
     )
 
     start = time.monotonic()
-    rows = await deps.connection.fetch(query.sql, *query.params)
+    try:
+        rows = await deps.connection.fetch(query.sql, *query.params)
+    except Exception:
+        logger.error("Tool '%s' query failed | sql=%s", "compare_periods", query.sql)
+        raise
     elapsed_ms = int((time.monotonic() - start) * 1000)
 
     results = []
@@ -98,7 +105,11 @@ async def get_spending_trend(
     )
 
     start = time.monotonic()
-    rows = await deps.connection.fetch(query.sql, *query.params)
+    try:
+        rows = await deps.connection.fetch(query.sql, *query.params)
+    except Exception:
+        logger.error("Tool '%s' query failed | sql=%s", "get_spending_trend", query.sql)
+        raise
     elapsed_ms = int((time.monotonic() - start) * 1000)
 
     results = [
@@ -144,7 +155,11 @@ async def get_category_breakdown(
     )
 
     start = time.monotonic()
-    rows = await deps.connection.fetch(query.sql, *query.params)
+    try:
+        rows = await deps.connection.fetch(query.sql, *query.params)
+    except Exception:
+        logger.error("Tool '%s' query failed | sql=%s", "get_category_breakdown", query.sql)
+        raise
     elapsed_ms = int((time.monotonic() - start) * 1000)
 
     results = [
