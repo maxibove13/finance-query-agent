@@ -16,8 +16,8 @@
     ],
     "amount_convention": {
       "direction_column": "movement_direction",
-      "expense_value": "debit",
-      "income_value": "credit"
+      "expense_value": "DEBIT",
+      "income_value": "CREDIT"
     }
   },
   "categories": {
@@ -45,8 +45,8 @@
     ],
     "amount_convention": {
       "direction_column": "movement_direction",
-      "expense_value": "debit",
-      "income_value": "credit"
+      "expense_value": "DEBIT",
+      "income_value": "CREDIT"
     }
   }
 }

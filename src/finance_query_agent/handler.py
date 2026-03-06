@@ -133,29 +133,34 @@ async def _process_request(body: dict[str, Any]) -> AgentResponse:
         # Store updated conversation (DynamoDB always uses string keys)
         await memory.save_history(str(raw_user_id), session_id, result.all_messages())
 
-        # Generate visualizations (best-effort, non-fatal)
-        from finance_query_agent.visualization import generate_visualizations
+        # Agent-decided visualization with programmatic guardrails
+        from finance_query_agent.schemas.responses import AnswerWithVisualization
+        from finance_query_agent.visualization import generate_visualizations, should_visualize
+
+        output = result.output
+        answer_text = output.answer
 
         visualizations = None
-        elapsed = time.monotonic() - request_start
-        viz_budget = settings.request_budget - elapsed - 1.0  # 1s reserve for response serialization
-        if deps.tool_results and viz_budget > 0.5:
-            try:
-                visualizations = await asyncio.wait_for(
-                    generate_visualizations(
-                        question=question,
-                        tool_results=deps.tool_results,
-                        model=settings.viz_model,
-                    ),
-                    timeout=viz_budget,
-                )
-            except TimeoutError:
-                logger.warning("Visualization timed out (budget=%.1fs)", viz_budget)
+        if isinstance(output, AnswerWithVisualization) and deps.tool_results and should_visualize(deps.tool_results):
+            elapsed = time.monotonic() - request_start
+            viz_budget = settings.request_budget - elapsed - 1.0  # 1s reserve for response serialization
+            if viz_budget > 0.5:
+                try:
+                    visualizations = await asyncio.wait_for(
+                        generate_visualizations(
+                            question=question,
+                            tool_results=deps.tool_results,
+                            model=settings.viz_model,
+                        ),
+                        timeout=viz_budget,
+                    )
+                except TimeoutError:
+                    logger.warning("Visualization timed out (budget=%.1fs)", viz_budget)
 
         # Build response
         usage = result.usage()
         return AgentResponse(
-            answer=result.output,
+            answer=answer_text,
             tool_calls=deps.tool_calls,
             visualizations=visualizations,
             fallback_used=deps.fallback_used,

@@ -26,6 +26,12 @@ class TestBuildSystemPrompt:
         prompt = build_system_prompt()
         assert "currencies" in prompt
 
+    def test_includes_visualization_guidance(self) -> None:
+        prompt = build_system_prompt()
+        assert "final_answer_with_chart" in prompt
+        assert "final_answer" in prompt
+        assert "visualization agent" in prompt
+
 
 class TestGetAgent:
     def setup_method(self) -> None:
@@ -54,6 +60,11 @@ class TestGetAgent:
         a1 = get_agent(_TEST_MODEL)
         a2 = get_agent(_TEST_MODEL)
         assert a1 is a2
+
+    def test_has_output_tools(self) -> None:
+        agent = get_agent(_TEST_MODEL)
+        output_tool_names = {t.name for t in agent._output_toolset._tool_defs}
+        assert output_tool_names == {"final_answer", "final_answer_with_chart"}
 
     def test_retries_set_to_three(self) -> None:
         agent = get_agent(_TEST_MODEL)

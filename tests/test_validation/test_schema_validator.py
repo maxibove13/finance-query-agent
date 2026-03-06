@@ -392,6 +392,113 @@ class TestValidateSchema:
         assert "bad_amount_col" in msg
 
 
+_CREATE_ENUM_TABLES = """
+CREATE TYPE movementdirection AS ENUM ('DEBIT', 'CREDIT');
+
+CREATE TABLE enum_movements (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    account_id UUID NOT NULL REFERENCES accounts(id),
+    category_id UUID REFERENCES tags(id),
+    issued_at DATE NOT NULL,
+    amount NUMERIC NOT NULL,
+    description TEXT NOT NULL,
+    movement_direction movementdirection NOT NULL,
+    balance NUMERIC
+);
+"""
+
+
+@pytest.fixture(scope="module")
+def postgres_url_with_enum():
+    """Postgres container with enum-typed direction column."""
+    skip_without_docker()
+    with PostgresContainer("postgres:16-alpine") as pg:
+        url = pg.get_connection_url().replace("+psycopg2", "")
+
+        import asyncio
+
+        import asyncpg as _asyncpg
+
+        async def _setup():
+            raw = await _asyncpg.connect(url)
+            try:
+                await raw.execute(_CREATE_TABLES)
+                await raw.execute(_CREATE_ENUM_TABLES)
+            finally:
+                await raw.close()
+
+        asyncio.new_event_loop().run_until_complete(_setup())
+        yield url
+
+
+@pytest.fixture
+async def conn_with_enum(postgres_url_with_enum):
+    """Connection to a DB that has enum-typed direction column."""
+    import finance_query_agent.connection as conn_module
+
+    conn_module._pool = None
+    c = Connection(postgres_url_with_enum)
+    await c.connect()
+    try:
+        yield c
+    finally:
+        if conn_module._pool is not None:
+            await conn_module._pool.close()
+            conn_module._pool = None
+
+
+def _enum_schema(expense: str = "DEBIT", income: str = "CREDIT") -> SchemaMapping:
+    """Schema using enum_movements table (direction is a real enum)."""
+    return SchemaMapping(
+        transactions=TableMapping(
+            table="enum_movements",
+            columns={
+                "date": "issued_at",
+                "amount": "amount",
+                "description": "description",
+                "user_id": ColumnRef(table="accounts", column="user_id"),
+                "currency": ColumnRef(table="accounts", column="currency"),
+                "account_id": "account_id",
+                "balance": "balance",
+            },
+            joins=[
+                JoinDef(table="accounts", on="enum_movements.account_id = accounts.id", type="inner"),
+                JoinDef(table="tags", on="enum_movements.category_id = tags.id", type="left"),
+            ],
+            amount_convention=AmountConvention(
+                direction_column="movement_direction",
+                expense_value=expense,
+                income_value=income,
+            ),
+        ),
+        categories=TableMapping(
+            table="tags",
+            columns={"id": "id", "name": "name"},
+            user_scoped=False,
+        ),
+        accounts=TableMapping(
+            table="accounts",
+            columns={"id": "id", "name": "alias", "user_id": "user_id"},
+        ),
+    )
+
+
+class TestEnumLabelValidation:
+    async def test_matching_enum_labels_pass(self, conn_with_enum):
+        result = await validate_schema(_enum_schema("DEBIT", "CREDIT"), conn_with_enum)
+        assert result.direction_is_enum is True
+
+    async def test_lowercase_mismatch_raises(self, conn_with_enum):
+        with pytest.raises(SchemaValidationError, match="'debit' not found in enum"):
+            await validate_schema(_enum_schema("debit", "credit"), conn_with_enum)
+
+    async def test_partial_mismatch_reports_specific_field(self, conn_with_enum):
+        with pytest.raises(SchemaValidationError, match="expense_value.*'debit'") as exc_info:
+            await validate_schema(_enum_schema("debit", "CREDIT"), conn_with_enum)
+        # income_value should NOT appear in errors since it matches
+        assert "income_value" not in str(exc_info.value)
+
+
 class TestIntrospectSchema:
     async def test_returns_table_descriptions(self, conn):
         result = await introspect_schema(conn, ["accounts", "tags"])

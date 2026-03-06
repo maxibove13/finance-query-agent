@@ -4,16 +4,17 @@ from __future__ import annotations
 
 import datetime
 
-from pydantic_ai import Agent, RunContext
+from pydantic_ai import Agent, RunContext, ToolOutput
 from pydantic_ai.models import Model
 
 from finance_query_agent.history import summarize_history
+from finance_query_agent.schemas.responses import AgentOutput, AnswerWithVisualization, TextAnswer
 from finance_query_agent.tools import AgentDeps
 
-_agents: dict[str, Agent[AgentDeps, str]] = {}
+_agents: dict[str, Agent[AgentDeps, AgentOutput]] = {}
 
 
-def get_agent(model: str | Model) -> Agent[AgentDeps, str]:
+def get_agent(model: str | Model) -> Agent[AgentDeps, AgentOutput]:
     """Cached agent factory, keyed by model. Reused across warm Lambda invocations."""
     key = str(model)
     if key in _agents:
@@ -33,9 +34,24 @@ def get_agent(model: str | Model) -> Agent[AgentDeps, str]:
     from finance_query_agent.tools.transactions import get_top_merchants, search_transactions
     from finance_query_agent.tools.trends import compare_periods, get_category_breakdown, get_spending_trend
 
-    agent = Agent(
+    agent: Agent[AgentDeps, AgentOutput] = Agent(
         model,
         deps_type=AgentDeps,
+        output_type=[
+            ToolOutput(
+                TextAnswer,
+                name="final_answer",
+                description="Return a text-only answer.",
+            ),
+            ToolOutput(
+                AnswerWithVisualization,
+                name="final_answer_with_chart",
+                description=(
+                    "Return a text answer and trigger chart generation from the tool results. "
+                    "Use when the data is categorical, comparative, or time-series and a chart would add value."
+                ),
+            ),
+        ],
         tools=[
             get_spending_by_category,
             get_monthly_totals,
@@ -76,4 +92,9 @@ Guidelines:
 - Format monetary values with currency codes and two decimal places (e.g., 1,234.56 USD).
 - When results span multiple currencies, present each currency separately. Never convert or sum across currencies.
 - If the user's question is ambiguous, ask a clarifying question rather than guessing.
-- Keep responses concise and focused on the data."""
+- Keep responses concise and focused on the data.
+- When your tool results contain data that would benefit from a visual chart (categorical breakdowns,
+  time-series trends, period comparisons), use the final_answer_with_chart output.
+  A separate visualization agent will create structured chart specs from the tool results.
+  Do not format charts, tables, or visual data in your text — provide a clear text summary only.
+- Use final_answer when the data is not chartable, when results are empty, or for simple factual answers."""
