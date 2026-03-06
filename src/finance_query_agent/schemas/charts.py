@@ -55,7 +55,7 @@ class GroupedBarChartSpec(BaseModel):
     title: str
     currency: str
     groups: list[GroupedBarItem]
-    series_labels: tuple[str, str]
+    series_labels: list[str] = Field(min_length=2, max_length=2)
 
 
 ChartSpec = Annotated[

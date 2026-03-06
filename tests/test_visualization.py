@@ -214,7 +214,7 @@ class TestChartSpecModels:
         )
         assert chart.chart_type == "grouped_bar"
         assert len(chart.groups) == 2
-        assert chart.series_labels == ("Oct 2025", "Nov 2025")
+        assert chart.series_labels == ["Oct 2025", "Nov 2025"]
 
 
 # ── AgentResponse with visualizations ────────────────────────────────────────
