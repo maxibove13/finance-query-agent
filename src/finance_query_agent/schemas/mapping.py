@@ -65,6 +65,13 @@ class TableMapping(BaseModel):
     user_scoped: bool = True
 
 
+class ViewMapping(BaseModel):
+    """Mapping for a pre-computed database view (e.g. materialized view with pre-joined exchange rates)."""
+
+    table: str
+    columns: dict[str, str]  # logical key -> actual column name
+
+
 class SchemaMapping(BaseModel):
     """Top-level schema configuration provided by the client."""
 
@@ -72,6 +79,26 @@ class SchemaMapping(BaseModel):
     categories: TableMapping
     accounts: TableMapping
     secondary_transactions: TableMapping | None = None
+    unified_expenses: ViewMapping | None = None
+    unified_income: ViewMapping | None = None
+    unified_balances: ViewMapping | None = None
+
+    @model_validator(mode="after")
+    def _validate_view_mappings(self) -> SchemaMapping:
+        """Validate that view mappings have required logical keys."""
+        view_required_keys: dict[str, set[str]] = {
+            "unified_expenses": {"user_id", "date", "usd_amount", "local_amount", "category", "merchant"},
+            "unified_income": {"user_id", "month", "usd_amount", "local_amount"},
+            "unified_balances": {"user_id", "date", "usd_total", "local_total"},
+        }
+        for field_name, required_keys in view_required_keys.items():
+            view: ViewMapping | None = getattr(self, field_name)
+            if view is None:
+                continue
+            missing = required_keys - set(view.columns.keys())
+            if missing:
+                raise ValueError(f"{field_name} missing required column mappings: {missing}")
+        return self
 
     @model_validator(mode="after")
     def _validate_transaction_tables(self) -> SchemaMapping:

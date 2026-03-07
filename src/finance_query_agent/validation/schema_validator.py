@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 from finance_query_agent.connection import Connection
 from finance_query_agent.exceptions import SchemaValidationError
-from finance_query_agent.schemas.mapping import AmountConvention, ColumnRef, SchemaMapping, TableMapping
+from finance_query_agent.schemas.mapping import AmountConvention, ColumnRef, SchemaMapping, TableMapping, ViewMapping
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +110,45 @@ async def _validate_enum_labels(
             )
 
 
+_TEXT_TYPES = frozenset({"text", "varchar", "bpchar"})
+
+# Columns that must be text-typed because the tool does lexicographic comparison.
+# Maps (view_field_name, logical_column_key) -> human-readable reason.
+_VIEW_COLUMN_TYPE_CONSTRAINTS: dict[str, dict[str, str]] = {
+    "unified_income": {
+        "month": "query_income compares month values lexicographically (expected format: YYYY/MM text)",
+    },
+}
+
+
+def _validate_view_mapping(
+    name: str,
+    mapping: ViewMapping,
+    db_columns: dict[str, set[str]],
+    db_types: dict[str, dict[str, str]],
+    errors: list[str],
+) -> None:
+    """Validate a single ViewMapping against DB columns and type constraints."""
+    if mapping.table not in db_columns:
+        errors.append(f"{name}: table '{mapping.table}' does not exist in the database")
+        return
+    table_cols = db_columns[mapping.table]
+    table_types = db_types.get(mapping.table, {})
+    for key, col in mapping.columns.items():
+        if col not in table_cols:
+            errors.append(f"{name}.columns.{key}: column '{col}' does not exist on table '{mapping.table}'")
+            continue
+        # Check type constraints for columns that require specific types
+        type_constraints = _VIEW_COLUMN_TYPE_CONSTRAINTS.get(name, {})
+        if key in type_constraints:
+            actual_type = table_types.get(col, "unknown")
+            if actual_type not in _TEXT_TYPES:
+                errors.append(
+                    f"{name}.columns.{key}: column '{col}' has type '{actual_type}' but must be "
+                    f"text — {type_constraints[key]}"
+                )
+
+
 async def validate_schema(schema: SchemaMapping, conn: Connection) -> ColumnTypeInfo:
     """Validate that all mapped tables and columns exist in the live database.
 
@@ -126,6 +165,11 @@ async def validate_schema(schema: SchemaMapping, conn: Connection) -> ColumnType
 
     if schema.secondary_transactions:
         _validate_table_mapping("secondary_transactions", schema.secondary_transactions, db_columns, errors)
+
+    for view_name in ("unified_expenses", "unified_income", "unified_balances"):
+        view = getattr(schema, view_name)
+        if view is not None:
+            _validate_view_mapping(view_name, view, db_columns, db_types, errors)
 
     if errors:
         raise SchemaValidationError("Schema validation failed:\n  - " + "\n  - ".join(errors))

@@ -17,20 +17,33 @@ class TestBuildSystemPrompt:
         prompt = build_system_prompt()
         assert datetime.date.today().isoformat() in prompt
 
-    def test_includes_tool_preference_guidance(self) -> None:
+    def test_includes_tool_selection_guidance(self) -> None:
         prompt = build_system_prompt()
         assert "run_constrained_query" in prompt
-        assert "Prefer predefined tools" in prompt
-
-    def test_includes_multi_currency_instruction(self) -> None:
-        prompt = build_system_prompt()
-        assert "currencies" in prompt
+        assert "query_expenses" in prompt
+        assert "query_income" in prompt
+        assert "query_balance_history" in prompt
+        assert "search_transactions" in prompt
+        assert "get_recurring_expenses" in prompt
 
     def test_includes_visualization_guidance(self) -> None:
         prompt = build_system_prompt()
         assert "final_answer_with_chart" in prompt
         assert "final_answer" in prompt
         assert "visualization agent" in prompt
+
+    def test_no_deleted_tool_references(self) -> None:
+        prompt = build_system_prompt()
+        for deleted in (
+            "get_spending_by_category",
+            "get_monthly_totals",
+            "get_balance_summary",
+            "get_top_merchants",
+            "compare_periods",
+            "get_spending_trend",
+            "get_category_breakdown",
+        ):
+            assert deleted not in prompt, f"Deleted tool '{deleted}' still referenced in system prompt"
 
 
 class TestGetAgent:
@@ -44,16 +57,12 @@ class TestGetAgent:
         agent = get_agent(_TEST_MODEL)
         tool_names = set(agent._function_toolset.tools.keys())
         assert tool_names == {
-            "get_spending_by_category",
-            "get_monthly_totals",
-            "get_balance_summary",
-            "get_top_merchants",
             "search_transactions",
-            "compare_periods",
-            "get_spending_trend",
-            "get_category_breakdown",
             "get_recurring_expenses",
             "run_constrained_query",
+            "query_expenses",
+            "query_income",
+            "query_balance_history",
         }
 
     def test_singleton_behavior(self) -> None:

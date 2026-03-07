@@ -16,20 +16,12 @@ from finance_query_agent.schemas.mapping import (
     JoinDef,
     SchemaMapping,
     TableMapping,
+    ViewMapping,
 )
 from finance_query_agent.tools import AgentDeps
 from finance_query_agent.tools.recurring import get_recurring_expenses
-from finance_query_agent.tools.spending import (
-    get_balance_summary,
-    get_monthly_totals,
-    get_spending_by_category,
-)
-from finance_query_agent.tools.transactions import get_top_merchants, search_transactions
-from finance_query_agent.tools.trends import (
-    compare_periods,
-    get_category_breakdown,
-    get_spending_trend,
-)
+from finance_query_agent.tools.transactions import search_transactions
+from finance_query_agent.tools.unified import query_balance_history, query_expenses, query_income
 
 
 def _make_schema() -> SchemaMapping:
@@ -57,6 +49,35 @@ def _make_schema() -> SchemaMapping:
         ),
         categories=TableMapping(table="tags", columns={"id": "id", "name": "name"}, user_scoped=False),
         accounts=TableMapping(table="accounts", columns={"id": "id", "name": "alias", "user_id": "user_id"}),
+        unified_expenses=ViewMapping(
+            table="expenses_mv",
+            columns={
+                "user_id": "user_id",
+                "date": "filter_at",
+                "usd_amount": "usd_amount",
+                "local_amount": "local_amount",
+                "category": "category",
+                "merchant": "description",
+            },
+        ),
+        unified_income=ViewMapping(
+            table="income_mv",
+            columns={
+                "user_id": "user_id",
+                "month": "month",
+                "usd_amount": "usd_amount",
+                "local_amount": "local_amount",
+            },
+        ),
+        unified_balances=ViewMapping(
+            table="balances_mv",
+            columns={
+                "user_id": "user_id",
+                "date": "snapshot_date",
+                "usd_total": "usd_total",
+                "local_total": "local_total",
+            },
+        ),
     )
 
 
@@ -87,30 +108,6 @@ class TestToolErrorLogging:
     """Each predefined tool should logger.error before re-raising on fetch failure."""
 
     @pytest.mark.asyncio
-    async def test_get_spending_by_category_logs_error(self, caplog):
-        deps = _make_failing_deps()
-        ctx = _make_ctx(deps)
-        with caplog.at_level(logging.ERROR), pytest.raises(RuntimeError):
-            await get_spending_by_category(ctx, _START, _END)
-        assert any("get_spending_by_category" in r.message for r in caplog.records)
-
-    @pytest.mark.asyncio
-    async def test_get_monthly_totals_logs_error(self, caplog):
-        deps = _make_failing_deps()
-        ctx = _make_ctx(deps)
-        with caplog.at_level(logging.ERROR), pytest.raises(RuntimeError):
-            await get_monthly_totals(ctx, start_month=1, start_year=2024, end_month=12, end_year=2024)
-        assert any("get_monthly_totals" in r.message for r in caplog.records)
-
-    @pytest.mark.asyncio
-    async def test_get_balance_summary_logs_error(self, caplog):
-        deps = _make_failing_deps()
-        ctx = _make_ctx(deps)
-        with caplog.at_level(logging.ERROR), pytest.raises(RuntimeError):
-            await get_balance_summary(ctx)
-        assert any("get_balance_summary" in r.message for r in caplog.records)
-
-    @pytest.mark.asyncio
     async def test_search_transactions_logs_error(self, caplog):
         deps = _make_failing_deps()
         ctx = _make_ctx(deps)
@@ -119,41 +116,33 @@ class TestToolErrorLogging:
         assert any("search_transactions" in r.message for r in caplog.records)
 
     @pytest.mark.asyncio
-    async def test_get_top_merchants_logs_error(self, caplog):
-        deps = _make_failing_deps()
-        ctx = _make_ctx(deps)
-        with caplog.at_level(logging.ERROR), pytest.raises(RuntimeError):
-            await get_top_merchants(ctx, _START, _END)
-        assert any("get_top_merchants" in r.message for r in caplog.records)
-
-    @pytest.mark.asyncio
-    async def test_compare_periods_logs_error(self, caplog):
-        deps = _make_failing_deps()
-        ctx = _make_ctx(deps)
-        with caplog.at_level(logging.ERROR), pytest.raises(RuntimeError):
-            await compare_periods(ctx, _START, date(2024, 6, 30), date(2024, 7, 1), _END)
-        assert any("compare_periods" in r.message for r in caplog.records)
-
-    @pytest.mark.asyncio
-    async def test_get_spending_trend_logs_error(self, caplog):
-        deps = _make_failing_deps()
-        ctx = _make_ctx(deps)
-        with caplog.at_level(logging.ERROR), pytest.raises(RuntimeError):
-            await get_spending_trend(ctx, _START, _END)
-        assert any("get_spending_trend" in r.message for r in caplog.records)
-
-    @pytest.mark.asyncio
-    async def test_get_category_breakdown_logs_error(self, caplog):
-        deps = _make_failing_deps()
-        ctx = _make_ctx(deps)
-        with caplog.at_level(logging.ERROR), pytest.raises(RuntimeError):
-            await get_category_breakdown(ctx, _START, _END)
-        assert any("get_category_breakdown" in r.message for r in caplog.records)
-
-    @pytest.mark.asyncio
     async def test_get_recurring_expenses_logs_error(self, caplog):
         deps = _make_failing_deps()
         ctx = _make_ctx(deps)
         with caplog.at_level(logging.ERROR), pytest.raises(RuntimeError):
             await get_recurring_expenses(ctx, _START, _END)
         assert any("get_recurring_expenses" in r.message for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_query_expenses_logs_error(self, caplog):
+        deps = _make_failing_deps()
+        ctx = _make_ctx(deps)
+        with caplog.at_level(logging.ERROR), pytest.raises(RuntimeError):
+            await query_expenses(ctx, _START, _END)
+        assert any("query_expenses" in r.message for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_query_income_logs_error(self, caplog):
+        deps = _make_failing_deps()
+        ctx = _make_ctx(deps)
+        with caplog.at_level(logging.ERROR), pytest.raises(RuntimeError):
+            await query_income(ctx, _START, _END)
+        assert any("query_income" in r.message for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_query_balance_history_logs_error(self, caplog):
+        deps = _make_failing_deps()
+        ctx = _make_ctx(deps)
+        with caplog.at_level(logging.ERROR), pytest.raises(RuntimeError):
+            await query_balance_history(ctx)
+        assert any("query_balance_history" in r.message for r in caplog.records)

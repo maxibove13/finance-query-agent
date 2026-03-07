@@ -25,14 +25,15 @@ def get_agent(model: str | Model) -> Agent[AgentDeps, AgentOutput]:
 
     from finance_query_agent.tools.fallback_sql import run_constrained_query
     from finance_query_agent.tools.recurring import get_recurring_expenses
-    from finance_query_agent.tools.spending import (
-        _prepare_balance_summary,
-        get_balance_summary,
-        get_monthly_totals,
-        get_spending_by_category,
+    from finance_query_agent.tools.transactions import search_transactions
+    from finance_query_agent.tools.unified import (
+        _prepare_query_balance_history,
+        _prepare_query_expenses,
+        _prepare_query_income,
+        query_balance_history,
+        query_expenses,
+        query_income,
     )
-    from finance_query_agent.tools.transactions import get_top_merchants, search_transactions
-    from finance_query_agent.tools.trends import compare_periods, get_category_breakdown, get_spending_trend
 
     agent: Agent[AgentDeps, AgentOutput] = Agent(
         model,
@@ -53,16 +54,12 @@ def get_agent(model: str | Model) -> Agent[AgentDeps, AgentOutput]:
             ),
         ],
         tools=[
-            get_spending_by_category,
-            get_monthly_totals,
-            Tool(get_balance_summary, prepare=_prepare_balance_summary),  # type: ignore[arg-type]
-            get_top_merchants,
             search_transactions,
-            compare_periods,
-            get_spending_trend,
-            get_category_breakdown,
             get_recurring_expenses,
             run_constrained_query,
+            Tool(query_expenses, prepare=_prepare_query_expenses),  # type: ignore[arg-type]
+            Tool(query_income, prepare=_prepare_query_income),  # type: ignore[arg-type]
+            Tool(query_balance_history, prepare=_prepare_query_balance_history),  # type: ignore[arg-type]
         ],
         retries=3,
         history_processors=[summarize_history],
@@ -83,18 +80,26 @@ def build_system_prompt() -> str:
 
 Your job is to answer questions about the user's financial transactions using the available tools.
 
-Guidelines:
-- Resolve relative dates to absolute dates before calling tools.
-  "last month" means the previous calendar month relative to today.
-- Prefer predefined tools (get_spending_by_category, get_monthly_totals, etc.) over the SQL fallback tool.
-- Only use run_constrained_query when no predefined tool can answer the question.
-- If a tool returns empty results, say so honestly. Never fabricate data.
-- Format monetary values with currency codes and two decimal places (e.g., 1,234.56 USD).
-- When results span multiple currencies, present each currency separately. Never convert or sum across currencies.
-- If the user's question is ambiguous, ask a clarifying question rather than guessing.
+## Tool selection
+
+- **Spending questions** (totals, by category, by merchant, monthly breakdown, trends):
+  Use query_expenses. Pick the right group_by and optional filters.
+  For period comparisons, call query_expenses twice with different date ranges.
+- **Income questions**: Use query_income.
+- **Balance / net worth questions**: Use query_balance_history.
+- **Finding specific transactions** (search by text, amount, date): Use search_transactions.
+- **Recurring payments / subscriptions**: Use get_recurring_expenses.
+- **Anything else**: Use run_constrained_query as a last resort. Never use it when a predefined tool fits.
+
+## Rules
+
+- Resolve relative dates to absolute dates before calling any tool.
+  "last month" = previous calendar month relative to today.
+- If a tool returns empty results, say so. Never fabricate data.
+- Format monetary values with two decimal places and currency code (e.g., 1,234.56 USD).
+- If the question is ambiguous, ask a clarifying question.
 - Keep responses concise and focused on the data.
-- When your tool results contain data that would benefit from a visual chart (categorical breakdowns,
-  time-series trends, period comparisons), use the final_answer_with_chart output.
-  A separate visualization agent will create structured chart specs from the tool results.
-  Do not format charts, tables, or visual data in your text — provide a clear text summary only.
-- Use final_answer when the data is not chartable, when results are empty, or for simple factual answers."""
+- When results are categorical, comparative, or time-series and a chart would help,
+  use final_answer_with_chart. A visualization agent will create chart specs.
+  Do not create tables or charts in your text — write a clear text summary only.
+- Use final_answer for non-chartable data, empty results, or simple factual answers."""
