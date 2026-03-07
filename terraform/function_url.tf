@@ -4,7 +4,7 @@ resource "aws_lambda_function_url" "agent" {
 
   cors {
     allow_origins = var.allowed_origins
-    allow_methods = ["POST", "OPTIONS"]
+    allow_methods = ["POST", "*"]
     allow_headers = ["content-type", "authorization"]
     max_age       = 3600
   }
