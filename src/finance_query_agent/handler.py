@@ -76,6 +76,17 @@ async def _process_request(body: dict[str, Any]) -> AgentResponse:
 
     settings = get_settings()
 
+    # --- Input validation ---
+    if not isinstance(question, str) or not question.strip():
+        raise ValueError("question must be a non-empty string")
+    question = question.strip()
+    if len(question) > settings.max_question_length:
+        raise ValueError(f"question exceeds maximum length of {settings.max_question_length} characters")
+    if not isinstance(session_id, str) or not session_id.strip():
+        raise ValueError("session_id must be a non-empty string")
+    if len(session_id) > settings.max_session_id_length:
+        raise ValueError(f"session_id exceeds maximum length of {settings.max_session_id_length} characters")
+
     if not _initialized:
         from finance_query_agent.observability import initialize
 
@@ -102,8 +113,12 @@ async def _process_request(body: dict[str, Any]) -> AgentResponse:
                 user_id = int(raw_user_id)
             else:
                 raise ValueError(f"user_id must be an integer, got {type(raw_user_id).__name__}: {raw_user_id!r}")
+            if user_id <= 0:
+                raise ValueError(f"user_id must be a positive integer, got {user_id}")
         else:
-            user_id = raw_user_id
+            if not isinstance(raw_user_id, str) or not raw_user_id.strip():
+                raise ValueError("user_id must be a non-empty string")
+            user_id = raw_user_id  # type: ignore[assignment]
 
         # Load conversation history (DynamoDB always uses string keys)
         history = await memory.load_history(str(raw_user_id), session_id)

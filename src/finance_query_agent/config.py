@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     logfire_token: str | None = None
     aws_lambda_function_name: str | None = None  # auto-set by Lambda
 
+    # Input validation
+    max_question_length: int = 2000  # characters
+    max_session_id_length: int = 128
+
     # Agent execution limits (30s caller-side budget)
     request_budget: float = 28.0  # total wall time for entire request (Lambda=30s, leave 2s margin)
     agent_request_limit: int = 7

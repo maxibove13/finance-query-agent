@@ -89,6 +89,8 @@ def _build_mocks() -> dict:
     settings.agent_run_timeout = 25.0
     settings.request_budget = 28.0
     settings.viz_model = "test:viz"
+    settings.max_question_length = 2000
+    settings.max_session_id_length = 128
 
     targets = {
         "finance_query_agent.observability.initialize": MagicMock(),
@@ -346,3 +348,89 @@ class TestProcessRequest:
         assert resp.answer == "No chart for you"
         assert resp.visualizations is None
         viz_mock.assert_not_awaited()
+
+
+class TestInputValidation:
+    """Tests for input validation added in _process_request."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_init(self):
+        handler_module._initialized = False
+        yield
+        handler_module._initialized = False
+
+    @pytest.fixture()
+    def mocks(self):
+        return _build_mocks()
+
+    @pytest.mark.asyncio()
+    async def test_rejects_empty_question(self, mocks: dict) -> None:
+        with ExitStack() as stack:
+            _apply(stack, mocks["targets"])
+            with pytest.raises(ValueError, match="non-empty string"):
+                await _process_request({"user_id": 1, "session_id": "s1", "question": ""})
+
+    @pytest.mark.asyncio()
+    async def test_rejects_whitespace_only_question(self, mocks: dict) -> None:
+        with ExitStack() as stack:
+            _apply(stack, mocks["targets"])
+            with pytest.raises(ValueError, match="non-empty string"):
+                await _process_request({"user_id": 1, "session_id": "s1", "question": "   "})
+
+    @pytest.mark.asyncio()
+    async def test_rejects_question_exceeding_max_length(self, mocks: dict) -> None:
+        long_q = "a" * 2001
+        with ExitStack() as stack:
+            _apply(stack, mocks["targets"])
+            with pytest.raises(ValueError, match="exceeds maximum length"):
+                await _process_request({"user_id": 1, "session_id": "s1", "question": long_q})
+
+    @pytest.mark.asyncio()
+    async def test_accepts_question_at_max_length(self, mocks: dict) -> None:
+        q = "a" * 2000
+        with ExitStack() as stack:
+            _apply(stack, mocks["targets"])
+            resp = await _process_request({"user_id": 1, "session_id": "s1", "question": q})
+        assert resp.original_question == q
+
+    @pytest.mark.asyncio()
+    async def test_rejects_empty_session_id(self, mocks: dict) -> None:
+        with ExitStack() as stack:
+            _apply(stack, mocks["targets"])
+            with pytest.raises(ValueError, match="session_id must be a non-empty string"):
+                await _process_request({"user_id": 1, "session_id": "", "question": "test?"})
+
+    @pytest.mark.asyncio()
+    async def test_rejects_session_id_exceeding_max_length(self, mocks: dict) -> None:
+        with ExitStack() as stack:
+            _apply(stack, mocks["targets"])
+            with pytest.raises(ValueError, match="session_id exceeds maximum length"):
+                await _process_request({"user_id": 1, "session_id": "x" * 129, "question": "test?"})
+
+    @pytest.mark.asyncio()
+    async def test_rejects_negative_user_id(self, mocks: dict) -> None:
+        with ExitStack() as stack:
+            _apply(stack, mocks["targets"])
+            with pytest.raises(ValueError, match="positive integer"):
+                await _process_request({"user_id": -1, "session_id": "s1", "question": "test?"})
+
+    @pytest.mark.asyncio()
+    async def test_rejects_zero_user_id(self, mocks: dict) -> None:
+        with ExitStack() as stack:
+            _apply(stack, mocks["targets"])
+            with pytest.raises(ValueError, match="positive integer"):
+                await _process_request({"user_id": 0, "session_id": "s1", "question": "test?"})
+
+    @pytest.mark.asyncio()
+    async def test_rejects_non_string_question(self, mocks: dict) -> None:
+        with ExitStack() as stack:
+            _apply(stack, mocks["targets"])
+            with pytest.raises(ValueError, match="non-empty string"):
+                await _process_request({"user_id": 1, "session_id": "s1", "question": 123})
+
+    @pytest.mark.asyncio()
+    async def test_strips_whitespace_from_question(self, mocks: dict) -> None:
+        with ExitStack() as stack:
+            _apply(stack, mocks["targets"])
+            resp = await _process_request({"user_id": 1, "session_id": "s1", "question": "  test?  "})
+        assert resp.original_question == "test?"
