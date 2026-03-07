@@ -12,16 +12,7 @@ from finance_query_agent.schemas.charts import ChartSpec
 
 logger = logging.getLogger(__name__)
 
-CHARTABLE_TOOLS = frozenset(
-    {
-        "get_spending_by_category",
-        "get_category_breakdown",
-        "get_monthly_totals",
-        "get_spending_trend",
-        "compare_periods",
-        "get_top_merchants",
-    }
-)
+CHARTABLE_TOOLS = frozenset({"query_expenses", "query_income", "query_balance_history"})
 
 _SYSTEM_PROMPT = """\
 You are a financial data visualization agent. Given a user's original question and \
@@ -32,23 +23,23 @@ the structured data returned by query tools, produce chart specifications.
 ### pie
 Category proportions (spending by category, breakdowns).
 - slices: list of {label, value, percentage (0-100)}
-- Good for: get_spending_by_category, get_category_breakdown
+- Good for: query_expenses (group_by=category)
 
 ### bar
 Categorical or time-series comparison.
 - bars: list of {label, value}
-- Good for: get_monthly_totals (label = "YYYY/MM"), get_top_merchants (label = merchant name)
+- Good for: query_expenses (group_by=month or merchant), query_income
 
 ### line
 Trends over time.
 - points: list of {label, value} where label is a time period
-- Good for: get_spending_trend
+- Good for: query_expenses (group_by=month), query_balance_history (multiple snapshots)
 
 ### grouped_bar
 Side-by-side period comparison.
 - groups: list of {label, value_a, value_b}
 - series_labels: tuple of two period names (e.g., ["Jan 2026", "Feb 2026"])
-- Good for: compare_periods
+- Good for: comparing two query_expenses results with different date ranges
 
 ## Rules
 

@@ -17,9 +17,9 @@ from finance_query_agent.schemas.mapping import (
     SchemaMapping,
     TableMapping,
 )
-from finance_query_agent.schemas.tool_results import MerchantSpending, Transaction
+from finance_query_agent.schemas.tool_results import Transaction
 from finance_query_agent.tools import AgentDeps
-from finance_query_agent.tools.transactions import get_top_merchants, search_transactions
+from finance_query_agent.tools.transactions import search_transactions
 
 
 def _make_schema() -> SchemaMapping:
@@ -141,32 +141,3 @@ class TestSearchTransactions:
 
         result = await search_transactions(ctx)
         assert result.total_count == 0
-
-
-class TestGetTopMerchants:
-    @pytest.mark.asyncio
-    async def test_maps_rows(self):
-        rows = [
-            {"merchant_name": "Amazon", "total_amount": Decimal("200"), "transaction_count": 8, "currency": "USD"},
-            {"merchant_name": "Uber", "total_amount": Decimal("80"), "transaction_count": 12, "currency": "USD"},
-        ]
-        deps = _make_deps(fetch_result=rows)
-        ctx = _make_ctx(deps)
-
-        result = await get_top_merchants(ctx, date(2024, 1, 1), date(2024, 12, 31))
-
-        assert len(result) == 2
-        assert isinstance(result[0], MerchantSpending)
-        assert result[0].merchant_name == "Amazon"
-
-    @pytest.mark.asyncio
-    async def test_records_tool_call(self):
-        deps = _make_deps()
-        ctx = _make_ctx(deps)
-
-        await get_top_merchants(ctx, date(2024, 1, 1), date(2024, 12, 31), limit=5, category="Food")
-
-        tc = deps.tool_calls[0]
-        assert tc.tool_name == "get_top_merchants"
-        assert tc.parameters["limit"] == 5
-        assert tc.parameters["category"] == "Food"

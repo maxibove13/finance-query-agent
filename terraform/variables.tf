@@ -31,3 +31,14 @@ variable "timeout" {
 variable "ecr_image_uri" {
   type = string
 }
+
+# Function URL
+variable "allowed_origins" {
+  type    = list(string)
+  default = []
+}
+
+variable "authorized_caller_arns" {
+  type    = list(string)
+  default = []
+}

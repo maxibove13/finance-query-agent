@@ -11,9 +11,9 @@ from pydantic_ai import RunContext
 from finance_query_agent.connection import Connection
 from finance_query_agent.query_builder import QueryBuilder
 from finance_query_agent.schemas.mapping import SchemaMapping
-from finance_query_agent.schemas.tool_results import MerchantSpending, Transaction
+from finance_query_agent.schemas.tool_results import Transaction
 from finance_query_agent.tools import AgentDeps
-from finance_query_agent.tools.transactions import get_top_merchants, search_transactions
+from finance_query_agent.tools.transactions import search_transactions
 
 SEED_USER_1 = 1
 
@@ -101,47 +101,3 @@ class TestSearchTransactionsIntegration:
 
         assert result.total_count > 0
         assert all(t.category == "entertainment" for t in result.transactions)
-
-
-class TestGetTopMerchantsIntegration:
-    @pytest.mark.asyncio
-    async def test_returns_merchants(self, db_connection, query_builder, sample_schema_mapping):
-        ctx = _make_ctx(db_connection, query_builder, sample_schema_mapping, SEED_USER_1)
-
-        result = await get_top_merchants(ctx, date(2025, 10, 1), date(2026, 2, 28))
-
-        assert len(result) > 0
-        assert all(isinstance(r, MerchantSpending) for r in result)
-        # Whole Foods should be near the top (many transactions)
-        names = [r.merchant_name for r in result]
-        assert "Whole Foods" in names
-
-    @pytest.mark.asyncio
-    async def test_sorted_by_amount_desc(self, db_connection, query_builder, sample_schema_mapping):
-        ctx = _make_ctx(db_connection, query_builder, sample_schema_mapping, SEED_USER_1)
-
-        result = await get_top_merchants(ctx, date(2025, 10, 1), date(2026, 2, 28))
-
-        usd = [r for r in result if r.currency == "USD"]
-        for i in range(len(usd) - 1):
-            assert usd[i].total_amount >= usd[i + 1].total_amount
-
-    @pytest.mark.asyncio
-    async def test_limit(self, db_connection, query_builder, sample_schema_mapping):
-        ctx = _make_ctx(db_connection, query_builder, sample_schema_mapping, SEED_USER_1)
-
-        result = await get_top_merchants(ctx, date(2025, 10, 1), date(2026, 2, 28), limit=3)
-
-        usd = [r for r in result if r.currency == "USD"]
-        assert len(usd) <= 3
-
-    @pytest.mark.asyncio
-    async def test_category_filter(self, db_connection, query_builder, sample_schema_mapping):
-        ctx = _make_ctx(db_connection, query_builder, sample_schema_mapping, SEED_USER_1)
-
-        result = await get_top_merchants(ctx, date(2025, 10, 1), date(2026, 2, 28), category="groceries")
-
-        usd = [r for r in result if r.currency == "USD"]
-        # Only grocery merchants
-        names = {r.merchant_name for r in usd}
-        assert names <= {"Whole Foods", "Trader Joes"}

@@ -12,11 +12,8 @@ from finance_query_agent.schemas.charts import (
     LineChartSpec,
     PieChartSpec,
 )
-from finance_query_agent.schemas.tool_results import (
-    CategorySpending,
-    MerchantSpending,
-    RecurringExpense,
-)
+from finance_query_agent.schemas.tool_results import RecurringExpense
+from finance_query_agent.schemas.unified_results import ExpenseGroup, IncomeMonth
 from finance_query_agent.visualization import (
     _chartable_row_count,
     _serialize_tool_results,
@@ -24,29 +21,25 @@ from finance_query_agent.visualization import (
     should_visualize,
 )
 
-# ── should_visualize ─────────────────────────────────────────────────────────
+# -- should_visualize --------------------------------------------------------
 
 
-_TWO_CATEGORIES = [
-    CategorySpending(category="Food", total_amount=Decimal("100"), transaction_count=5, currency="USD"),
-    CategorySpending(category="Transport", total_amount=Decimal("50"), transaction_count=3, currency="USD"),
+_TWO_EXPENSES = [
+    ExpenseGroup(label="Food", total_amount=Decimal("100"), transaction_count=5, currency="usd"),
+    ExpenseGroup(label="Transport", total_amount=Decimal("50"), transaction_count=3, currency="usd"),
 ]
 
 
 class TestShouldVisualize:
-    def test_returns_true_with_enough_rows(self):
-        assert should_visualize([("get_spending_by_category", _TWO_CATEGORIES)]) is True
+    def test_returns_true_for_query_expenses(self):
+        assert should_visualize([("query_expenses", _TWO_EXPENSES)]) is True
 
-    def test_returns_true_for_each_chartable_tool(self):
-        tools = (
-            "get_category_breakdown",
-            "get_monthly_totals",
-            "get_spending_trend",
-            "compare_periods",
-            "get_top_merchants",
-        )
-        for tool in tools:
-            assert should_visualize([(tool, ["a", "b"])]) is True, tool
+    def test_returns_true_for_query_income(self):
+        data = [
+            IncomeMonth(month_label="2025/01", total_amount=Decimal("3000"), currency="usd"),
+            IncomeMonth(month_label="2025/02", total_amount=Decimal("3200"), currency="usd"),
+        ]
+        assert should_visualize([("query_income", data)]) is True
 
     def test_returns_false_for_non_chartable_tools(self):
         assert should_visualize([("search_transactions", ["a", "b"])]) is False
@@ -54,8 +47,8 @@ class TestShouldVisualize:
     def test_returns_false_for_recurring_expenses(self):
         assert should_visualize([("get_recurring_expenses", ["a", "b"])]) is False
 
-    def test_returns_false_for_balance_summary(self):
-        assert should_visualize([("get_balance_summary", ["a", "b"])]) is False
+    def test_returns_true_for_balance_history(self):
+        assert should_visualize([("query_balance_history", ["a", "b"])]) is True
 
     def test_returns_false_for_fallback_sql(self):
         assert should_visualize([("run_constrained_query", ["a", "b"])]) is False
@@ -64,60 +57,56 @@ class TestShouldVisualize:
         assert should_visualize([]) is False
 
     def test_returns_false_for_single_row(self):
-        assert should_visualize([("get_spending_by_category", [_TWO_CATEGORIES[0]])]) is False
+        assert should_visualize([("query_expenses", [_TWO_EXPENSES[0]])]) is False
 
     def test_returns_false_for_empty_chartable_data(self):
-        assert should_visualize([("get_spending_by_category", [])]) is False
+        assert should_visualize([("query_expenses", [])]) is False
 
     def test_mixed_chartable_and_non_chartable(self):
         results = [
             ("search_transactions", []),
-            ("get_spending_by_category", _TWO_CATEGORIES),
+            ("query_expenses", _TWO_EXPENSES),
         ]
         assert should_visualize(results) is True
 
     def test_rows_accumulate_across_chartable_tools(self):
-        merchant = MerchantSpending(
-            merchant_name="X",
-            total_amount=Decimal("10"),
-            transaction_count=1,
-            currency="USD",
-        )
+        income = IncomeMonth(month_label="2025/01", total_amount=Decimal("3000"), currency="usd")
         results = [
-            ("get_spending_by_category", [_TWO_CATEGORIES[0]]),
-            ("get_top_merchants", [merchant]),
+            ("query_expenses", [_TWO_EXPENSES[0]]),
+            ("query_income", [income]),
         ]
         assert should_visualize(results) is True
 
 
 class TestChartableRowCount:
     def test_counts_list_items(self):
-        assert _chartable_row_count([("get_spending_by_category", _TWO_CATEGORIES)]) == 2
+        assert _chartable_row_count([("query_expenses", _TWO_EXPENSES)]) == 2
 
     def test_counts_non_list_as_one(self):
-        assert _chartable_row_count([("get_spending_by_category", "scalar")]) == 1
+        assert _chartable_row_count([("query_expenses", "scalar")]) == 1
 
     def test_ignores_non_chartable(self):
         assert _chartable_row_count([("search_transactions", ["a", "b", "c"])]) == 0
 
     def test_sums_across_tools(self):
+        income = IncomeMonth(month_label="2025/01", total_amount=Decimal("3000"), currency="usd")
         results = [
-            ("get_spending_by_category", ["a"]),
-            ("get_top_merchants", ["b", "c"]),
+            ("query_expenses", [_TWO_EXPENSES[0]]),
+            ("query_income", [income, income]),
         ]
         assert _chartable_row_count(results) == 3
 
 
-# ── _serialize_tool_results ──────────────────────────────────────────────────
+# -- _serialize_tool_results -------------------------------------------------
 
 
 class TestSerializeToolResults:
     def test_serializes_pydantic_models(self):
         data = [
-            CategorySpending(category="Food", total_amount=Decimal("100"), transaction_count=5, currency="USD"),
+            ExpenseGroup(label="Food", total_amount=Decimal("100"), transaction_count=5, currency="usd"),
         ]
-        result = _serialize_tool_results([("get_spending_by_category", data)])
-        assert "get_spending_by_category" in result
+        result = _serialize_tool_results([("query_expenses", data)])
+        assert "query_expenses" in result
         assert "Food" in result
         assert "100" in result
 
@@ -136,30 +125,37 @@ class TestSerializeToolResults:
         assert result == ""
 
     def test_handles_multiple_tools(self):
-        spending = [
-            CategorySpending(category="Food", total_amount=Decimal("100"), transaction_count=5, currency="USD"),
+        expenses = [
+            ExpenseGroup(label="Food", total_amount=Decimal("100"), transaction_count=5, currency="usd"),
         ]
-        merchants = [
-            MerchantSpending(
-                merchant_name="Whole Foods", total_amount=Decimal("80"), transaction_count=3, currency="USD"
-            ),
+        income = [
+            IncomeMonth(month_label="2025/01", total_amount=Decimal("3000"), currency="usd"),
         ]
         result = _serialize_tool_results(
             [
-                ("get_spending_by_category", spending),
-                ("get_top_merchants", merchants),
+                ("query_expenses", expenses),
+                ("query_income", income),
             ]
         )
-        assert "get_spending_by_category" in result
-        assert "get_top_merchants" in result
+        assert "query_expenses" in result
+        assert "query_income" in result
+
+    def test_serializes_query_expenses_results(self):
+        data = [
+            ExpenseGroup(label="Food", total_amount=Decimal("100"), transaction_count=5, currency="usd"),
+        ]
+        result = _serialize_tool_results([("query_expenses", data)])
+        assert "query_expenses" in result
+        assert "Food" in result
+        assert "100" in result
 
     def test_empty_data_still_serializes(self):
-        result = _serialize_tool_results([("get_spending_by_category", [])])
-        assert "get_spending_by_category" in result
+        result = _serialize_tool_results([("query_expenses", [])])
+        assert "query_expenses" in result
         assert "[]" in result
 
 
-# ── Chart spec model validation ──────────────────────────────────────────────
+# -- Chart spec model validation ---------------------------------------------
 
 
 class TestChartSpecModels:
@@ -217,7 +213,7 @@ class TestChartSpecModels:
         assert chart.series_labels == ["Oct 2025", "Nov 2025"]
 
 
-# ── AgentResponse with visualizations ────────────────────────────────────────
+# -- AgentResponse with visualizations ---------------------------------------
 
 
 class TestAgentResponseVisualization:
@@ -284,7 +280,7 @@ class TestAgentResponseVisualization:
         assert restored.visualizations[0].chart_type == "bar"
 
 
-# ── generate_visualizations edge cases ───────────────────────────────────────
+# -- generate_visualizations edge cases --------------------------------------
 
 
 class TestGenerateVisualizations:
@@ -295,9 +291,9 @@ class TestGenerateVisualizations:
         assert result is None
 
     def test_returns_none_for_single_row(self):
-        data = [CategorySpending(category="Food", total_amount=Decimal("100"), transaction_count=5, currency="USD")]
+        data = [ExpenseGroup(label="Food", total_amount=Decimal("100"), transaction_count=5, currency="usd")]
         result = asyncio.run(
-            generate_visualizations("query", [("get_spending_by_category", data)]),
+            generate_visualizations("query", [("query_expenses", data)]),
         )
         assert result is None
 
@@ -315,7 +311,7 @@ class TestGenerateVisualizations:
             async def _run():
                 try:
                     return await asyncio.wait_for(
-                        generate_visualizations("spending?", [("get_spending_by_category", _TWO_CATEGORIES)]),
+                        generate_visualizations("spending?", [("query_expenses", _TWO_EXPENSES)]),
                         timeout=0.1,
                     )
                 except TimeoutError:

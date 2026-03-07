@@ -286,7 +286,7 @@ class TestProcessRequest:
 
         async def _run_with_results(*args, **kwargs):
             deps = kwargs["deps"]
-            deps.tool_results = [("get_spending_by_category", ["a", "b"])]
+            deps.tool_results = [("query_expenses", ["a", "b"])]
             return original_return
 
         mocks["agent"].run = AsyncMock(side_effect=_run_with_results)

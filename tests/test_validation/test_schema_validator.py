@@ -13,6 +13,7 @@ from finance_query_agent.schemas.mapping import (
     JoinDef,
     SchemaMapping,
     TableMapping,
+    ViewMapping,
 )
 from finance_query_agent.validation.schema_validator import ColumnTypeInfo, introspect_schema, validate_schema
 from tests.conftest import skip_without_docker
@@ -56,6 +57,23 @@ CREATE TABLE credit_card_movements (
     description TEXT NOT NULL,
     currency TEXT NOT NULL,
     movement_direction TEXT NOT NULL
+);
+
+CREATE TABLE historical_expenses_mv (
+    user_id UUID NOT NULL,
+    filter_at DATE NOT NULL,
+    usd_amount NUMERIC NOT NULL,
+    local_amount NUMERIC NOT NULL,
+    category TEXT,
+    description TEXT
+);
+
+CREATE TABLE historical_incomes_mv (
+    user_id UUID NOT NULL,
+    month TEXT NOT NULL,
+    month_as_date DATE,
+    usd_amount NUMERIC NOT NULL,
+    local_amount NUMERIC NOT NULL
 );
 """
 
@@ -390,6 +408,105 @@ class TestValidateSchema:
         msg = str(exc_info.value)
         assert "bad_date_col" in msg
         assert "bad_amount_col" in msg
+
+
+class TestValidateViewMapping:
+    async def test_valid_view_mapping_passes(self, conn):
+        schema = _valid_schema()
+        schema = schema.model_copy(
+            update={
+                "unified_expenses": ViewMapping(
+                    table="historical_expenses_mv",
+                    columns={
+                        "user_id": "user_id",
+                        "date": "filter_at",
+                        "usd_amount": "usd_amount",
+                        "local_amount": "local_amount",
+                        "category": "category",
+                        "merchant": "description",
+                    },
+                )
+            }
+        )
+        result = await validate_schema(schema, conn)
+        assert isinstance(result, ColumnTypeInfo)
+
+    async def test_view_missing_table_raises(self, conn):
+        schema = _valid_schema()
+        schema = schema.model_copy(
+            update={
+                "unified_expenses": ViewMapping(
+                    table="nonexistent_mv",
+                    columns={
+                        "user_id": "user_id",
+                        "date": "filter_at",
+                        "usd_amount": "usd_amount",
+                        "local_amount": "local_amount",
+                        "category": "category",
+                        "merchant": "description",
+                    },
+                )
+            }
+        )
+        with pytest.raises(SchemaValidationError, match="nonexistent_mv.*does not exist"):
+            await validate_schema(schema, conn)
+
+    async def test_view_missing_column_raises(self, conn):
+        schema = _valid_schema()
+        schema = schema.model_copy(
+            update={
+                "unified_expenses": ViewMapping(
+                    table="historical_expenses_mv",
+                    columns={
+                        "user_id": "user_id",
+                        "date": "filter_at",
+                        "usd_amount": "nonexistent_col",
+                        "local_amount": "local_amount",
+                        "category": "category",
+                        "merchant": "description",
+                    },
+                )
+            }
+        )
+        with pytest.raises(SchemaValidationError, match="nonexistent_col.*does not exist"):
+            await validate_schema(schema, conn)
+
+    async def test_income_text_month_passes(self, conn):
+        schema = _valid_schema()
+        schema = schema.model_copy(
+            update={
+                "unified_income": ViewMapping(
+                    table="historical_incomes_mv",
+                    columns={
+                        "user_id": "user_id",
+                        "month": "month",
+                        "usd_amount": "usd_amount",
+                        "local_amount": "local_amount",
+                    },
+                )
+            }
+        )
+        result = await validate_schema(schema, conn)
+        assert isinstance(result, ColumnTypeInfo)
+
+    async def test_income_date_month_raises(self, conn):
+        """month column mapped to a DATE column should fail — lexicographic comparison requires text."""
+        schema = _valid_schema()
+        schema = schema.model_copy(
+            update={
+                "unified_income": ViewMapping(
+                    table="historical_incomes_mv",
+                    columns={
+                        "user_id": "user_id",
+                        "month": "month_as_date",
+                        "usd_amount": "usd_amount",
+                        "local_amount": "local_amount",
+                    },
+                )
+            }
+        )
+        with pytest.raises(SchemaValidationError, match="month.*must be text"):
+            await validate_schema(schema, conn)
 
 
 _CREATE_ENUM_TABLES = """

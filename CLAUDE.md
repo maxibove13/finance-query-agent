@@ -78,6 +78,16 @@ Browser -> MPI API Gateway -> MPI Lambda -> boto3 invoke -> Agent Lambda
 - **PII protection:** Two layers — Fernet encryption at rest (DynamoDB), regex scrubbing in traces (Logfire). No NER models.
 - **Single connection:** One `asyncpg.connect()` per invocation (no pool). Matches Lambda's single-request model.
 
+## Branching
+
+Every feature branch must correspond to a Linear issue. Use the branch name Linear suggests (visible in the issue's `gitBranchName` field):
+
+```
+maxibove13/mpi-<NUMBER>-<slug>
+```
+
+Include `[MPI-<NUMBER>]` in the PR title and `Closes MPI-<NUMBER>` in the PR body so Linear auto-tracks it.
+
 ## Code Style
 
 - Run `uv run ruff check . --fix && uv run ruff format .` before commits.

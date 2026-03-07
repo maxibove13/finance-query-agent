@@ -90,7 +90,13 @@ async def get_recurring_expenses(
     period_end: date,
     min_occurrences: int = 3,
 ) -> list[RecurringExpense]:
-    """Identify recurring transactions (subscriptions, regular payments). Only counts expenses."""
+    """Detect recurring payments (subscriptions, regular charges) by analyzing transaction frequency.
+
+    Looks at expense transactions only. Groups by merchant, then classifies each merchant's
+    payment intervals as weekly, monthly, or yearly. Merchants with irregular intervals are excluded.
+    min_occurrences sets the minimum number of transactions required to consider a merchant recurring.
+    Returns per-currency rows sorted by total amount descending.
+    """
     deps = ctx.deps
     query = deps.query_builder.build_recurring_expenses(
         user_id=deps.user_id,

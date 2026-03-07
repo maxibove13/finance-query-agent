@@ -1,4 +1,4 @@
-"""Transaction tools: search_transactions, get_top_merchants."""
+"""Transaction tools: search_transactions."""
 
 from __future__ import annotations
 
@@ -11,7 +11,6 @@ from pydantic_ai import RunContext
 
 from finance_query_agent.schemas.responses import ToolCallRecord
 from finance_query_agent.schemas.tool_results import (
-    MerchantSpending,
     Transaction,
     TransactionSearchResult,
 )
@@ -32,7 +31,13 @@ async def search_transactions(
     limit: int = 20,
     offset: int = 0,
 ) -> TransactionSearchResult:
-    """Search transactions by description, amount, date, or category. Returns all directions unless filtered."""
+    """Search individual transactions by text, amount range, date range, category, or direction.
+
+    Returns per-currency rows — each row includes its original currency code.
+    Supports pagination: use limit/offset to page through results. Response includes total_count and has_more.
+    All directions (expense + income) are returned unless direction is explicitly filtered.
+    query does a case-insensitive substring match on the transaction description.
+    """
     deps = ctx.deps
     data_query, count_query = deps.query_builder.build_search_transactions(
         user_id=deps.user_id,
@@ -99,55 +104,3 @@ async def search_transactions(
     )
     deps.tool_results.append(("search_transactions", result))
     return result
-
-
-async def get_top_merchants(
-    ctx: RunContext[AgentDeps],
-    period_start: date,
-    period_end: date,
-    limit: int = 10,
-    category: str | None = None,
-) -> list[MerchantSpending]:
-    """Get top merchants by spending. Only counts expenses."""
-    deps = ctx.deps
-    query = deps.query_builder.build_top_merchants(
-        user_id=deps.user_id,
-        period_start=period_start,
-        period_end=period_end,
-        limit=limit,
-        category=category,
-    )
-
-    start = time.monotonic()
-    try:
-        rows = await deps.connection.fetch(query.sql, *query.params)
-    except Exception:
-        logger.error("Tool '%s' query failed | sql=%s", "get_top_merchants", query.sql)
-        raise
-    elapsed_ms = int((time.monotonic() - start) * 1000)
-
-    results = [
-        MerchantSpending(
-            merchant_name=row["merchant_name"],
-            total_amount=row["total_amount"],
-            transaction_count=row["transaction_count"],
-            currency=row["currency"],
-        )
-        for row in rows
-    ]
-
-    deps.tool_calls.append(
-        ToolCallRecord(
-            tool_name="get_top_merchants",
-            parameters={
-                "period_start": str(period_start),
-                "period_end": str(period_end),
-                "limit": limit,
-                "category": category,
-            },
-            execution_time_ms=elapsed_ms,
-            row_count=len(rows),
-        )
-    )
-    deps.tool_results.append(("get_top_merchants", results))
-    return results

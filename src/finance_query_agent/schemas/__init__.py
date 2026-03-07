@@ -17,39 +17,35 @@ from finance_query_agent.schemas.mapping import (
     JoinDef,
     SchemaMapping,
     TableMapping,
+    ViewMapping,
 )
 from finance_query_agent.schemas.responses import AgentResponse, TokenUsage, ToolCallRecord
 from finance_query_agent.schemas.tool_results import (
-    AccountSummary,
-    CategoryBreakdown,
-    CategorySpending,
-    MerchantSpending,
-    MonthlyTotal,
-    PeriodComparison,
     RecurringExpense,
     Transaction,
     TransactionSearchResult,
-    TrendPoint,
+)
+from finance_query_agent.schemas.unified_results import (
+    BalanceSnapshot,
+    ExpenseGroup,
+    IncomeMonth,
 )
 
 __all__ = [
-    "AccountSummary",
     "AgentResponse",
     "AmountConvention",
+    "BalanceSnapshot",
     "BarChartSpec",
     "BarItem",
-    "CategoryBreakdown",
-    "CategorySpending",
     "ChartSpec",
     "ColumnRef",
+    "ExpenseGroup",
     "GroupedBarChartSpec",
     "GroupedBarItem",
+    "IncomeMonth",
     "JoinDef",
     "LineChartSpec",
     "LinePoint",
-    "MerchantSpending",
-    "MonthlyTotal",
-    "PeriodComparison",
     "PieChartSpec",
     "PieSlice",
     "RecurringExpense",
@@ -59,5 +55,5 @@ __all__ = [
     "ToolCallRecord",
     "Transaction",
     "TransactionSearchResult",
-    "TrendPoint",
+    "ViewMapping",
 ]
