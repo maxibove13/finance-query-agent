@@ -1,4 +1,5 @@
 resource "aws_lambda_function_url" "agent" {
+  count              = length(var.allowed_origins) > 0 ? 1 : 0
   function_name      = aws_lambda_function.agent.function_name
   authorization_type = "AWS_IAM"
 
