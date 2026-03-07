@@ -21,7 +21,10 @@ class ColumnTypeInfo:
 
 
 async def _get_db_columns(conn: Connection) -> tuple[dict[str, set[str]], dict[str, dict[str, str]]]:
-    """Fetch all table->columns and their types from information_schema.
+    """Fetch all table->columns and their types from information_schema + materialized views.
+
+    information_schema.columns covers tables and regular views but NOT materialized views.
+    We supplement with pg_attribute/pg_class (relkind='m') to also discover MV columns.
 
     Returns (columns_map, types_map) where:
         columns_map = {table: {col1, col2, ...}}
@@ -31,9 +34,23 @@ async def _get_db_columns(conn: Connection) -> tuple[dict[str, set[str]], dict[s
         "SELECT table_name, column_name, data_type, udt_name "
         "FROM information_schema.columns WHERE table_schema = 'public'"
     )
+    mv_rows = await conn.fetch(
+        "SELECT c.relname AS table_name, a.attname AS column_name, "
+        "t.typname AS udt_name "
+        "FROM pg_attribute a "
+        "JOIN pg_class c ON a.attrelid = c.oid "
+        "JOIN pg_type t ON a.atttypid = t.oid "
+        "WHERE c.relkind = 'm' AND a.attnum > 0 AND NOT a.attisdropped "
+        "AND c.relnamespace = 'public'::regnamespace"
+    )
     columns: dict[str, set[str]] = {}
     types: dict[str, dict[str, str]] = {}
     for row in rows:
+        tbl = row["table_name"]
+        col = row["column_name"]
+        columns.setdefault(tbl, set()).add(col)
+        types.setdefault(tbl, {})[col] = row["udt_name"]
+    for row in mv_rows:
         tbl = row["table_name"]
         col = row["column_name"]
         columns.setdefault(tbl, set()).add(col)
@@ -211,6 +228,7 @@ async def introspect_schema(conn: Connection, tables: list[str]) -> str:
     """Return a DDL-like schema description for the given tables.
 
     Used as LLM context for the fallback SQL tool.
+    Covers regular tables, views, AND materialized views.
     """
     rows = await conn.fetch(
         "SELECT table_name, column_name, data_type, is_nullable "
@@ -219,13 +237,26 @@ async def introspect_schema(conn: Connection, tables: list[str]) -> str:
         "ORDER BY table_name, ordinal_position",
         tables,
     )
+    mv_rows = await conn.fetch(
+        "SELECT c.relname AS table_name, a.attname AS column_name, "
+        "format_type(a.atttypid, a.atttypmod) AS data_type, "
+        "CASE WHEN a.attnotnull THEN 'NO' ELSE 'YES' END AS is_nullable "
+        "FROM pg_attribute a "
+        "JOIN pg_class c ON a.attrelid = c.oid "
+        "WHERE c.relkind = 'm' AND a.attnum > 0 AND NOT a.attisdropped "
+        "AND c.relnamespace = 'public'::regnamespace "
+        "AND c.relname = ANY($1) "
+        "ORDER BY c.relname, a.attnum",
+        tables,
+    )
 
-    if not rows:
+    all_rows = list(rows) + list(mv_rows)
+    if not all_rows:
         return ""
 
     lines: list[str] = []
     current_table = ""
-    for row in rows:
+    for row in all_rows:
         if row["table_name"] != current_table:
             if current_table:
                 lines.append(")")
