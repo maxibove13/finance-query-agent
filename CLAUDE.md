@@ -59,7 +59,8 @@ Browser -> MPI API Gateway -> MPI Lambda -> boto3 invoke -> Agent Lambda
 | Regex PII scrubbing | `src/finance_query_agent/redaction.py` |
 | Conversation summarization | `src/finance_query_agent/history.py` |
 | Logfire + scrubbing callback | `src/finance_query_agent/observability.py` |
-| Predefined query tools | `src/finance_query_agent/tools/` |
+| View-backed tools (expenses, income, balances) | `src/finance_query_agent/tools/unified.py` |
+| Direct query tools (transactions, recurring) | `src/finance_query_agent/tools/transactions.py`, `recurring.py` |
 | Constrained SQL fallback | `src/finance_query_agent/tools/fallback_sql.py` |
 | SQL & schema validation | `src/finance_query_agent/validation/` |
 | Pydantic models (mapping, results, responses) | `src/finance_query_agent/schemas/` |
@@ -71,8 +72,8 @@ Browser -> MPI API Gateway -> MPI Lambda -> boto3 invoke -> Agent Lambda
 
 - **Service, not SDK:** Lambda invoked by MPI's backend via `boto3 lambda.invoke()` (30s timeout). Synchronous request-response.
 - **Tools-as-wrappers:** The LLM picks a tool and fills params; the service generates and executes parameterized SQL. No raw SQL from the LLM for the common case.
-- **Schema mapping:** Declarative `SchemaMapping` config. The service derives all queries from it.
-- **Multi-currency:** Results always grouped per currency. Never converts or sums across currencies.
+- **Schema mapping:** Declarative `SchemaMapping` config with optional `ViewMapping` for materialized views. View-backed tools query pre-computed views; direct query tools use `QueryBuilder`.
+- **Multi-currency:** View-backed tools support `currency` param (`usd`/`local`) for pre-converted amounts. Direct query tools return raw per-transaction currency.
 - **User isolation:** Every query scoped to `user_id`. Injected by the service, never by the LLM.
 - **Read-only:** No write operations. Enforced at DB role level (security boundary) + keyword rejection (defense-in-depth).
 - **PII protection:** Two layers — Fernet encryption at rest (DynamoDB), regex scrubbing in traces (Logfire). No NER models.
