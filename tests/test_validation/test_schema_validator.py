@@ -638,3 +638,122 @@ class TestIntrospectSchema:
         assert "NOT NULL" in result
         # alias is nullable
         assert "NULL" in result
+
+
+# --- Materialized view tests (real MVs, not regular tables) ---
+
+_CREATE_MV_BASE = """
+CREATE TABLE IF NOT EXISTS mv_base_accounts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS mv_base_movements (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    account_id UUID NOT NULL REFERENCES mv_base_accounts(id),
+    issued_at DATE NOT NULL,
+    amount NUMERIC NOT NULL,
+    description TEXT NOT NULL
+);
+
+CREATE MATERIALIZED VIEW test_expenses_mv AS
+SELECT
+    a.user_id,
+    m.issued_at,
+    m.amount AS usd_amount,
+    m.amount AS local_amount,
+    'uncategorized' AS category,
+    m.description
+FROM mv_base_movements m
+JOIN mv_base_accounts a ON m.account_id = a.id;
+"""
+
+
+@pytest.fixture(scope="module")
+def postgres_url_with_mv():
+    """Postgres container with a real materialized view."""
+    skip_without_docker()
+    with PostgresContainer("postgres:16-alpine") as pg:
+        url = pg.get_connection_url().replace("+psycopg2", "")
+
+        import asyncio
+
+        import asyncpg as _asyncpg
+
+        async def _setup():
+            raw = await _asyncpg.connect(url)
+            try:
+                await raw.execute(_CREATE_TABLES)
+                await raw.execute(_CREATE_MV_BASE)
+            finally:
+                await raw.close()
+
+        asyncio.new_event_loop().run_until_complete(_setup())
+        yield url
+
+
+@pytest.fixture
+async def conn_with_mv(postgres_url_with_mv):
+    """Connection to a DB that has a real materialized view."""
+    import finance_query_agent.connection as conn_module
+
+    conn_module._pool = None
+    c = Connection(postgres_url_with_mv)
+    await c.connect()
+    try:
+        yield c
+    finally:
+        if conn_module._pool is not None:
+            await conn_module._pool.close()
+            conn_module._pool = None
+
+
+class TestMaterializedViewDiscovery:
+    async def test_validate_schema_discovers_mv_columns(self, conn_with_mv):
+        """Real MV (not a regular table) is discovered by _get_db_columns."""
+        schema = _valid_schema()
+        schema = schema.model_copy(
+            update={
+                "unified_expenses": ViewMapping(
+                    table="test_expenses_mv",
+                    columns={
+                        "user_id": "user_id",
+                        "date": "issued_at",
+                        "usd_amount": "usd_amount",
+                        "local_amount": "local_amount",
+                        "category": "category",
+                        "merchant": "description",
+                    },
+                )
+            }
+        )
+        result = await validate_schema(schema, conn_with_mv)
+        assert isinstance(result, ColumnTypeInfo)
+
+    async def test_validate_schema_mv_missing_column_raises(self, conn_with_mv):
+        """Validation catches a bad column on a real MV."""
+        schema = _valid_schema()
+        schema = schema.model_copy(
+            update={
+                "unified_expenses": ViewMapping(
+                    table="test_expenses_mv",
+                    columns={
+                        "user_id": "user_id",
+                        "date": "issued_at",
+                        "usd_amount": "nonexistent_col",
+                        "local_amount": "local_amount",
+                        "category": "category",
+                        "merchant": "description",
+                    },
+                )
+            }
+        )
+        with pytest.raises(SchemaValidationError, match="nonexistent_col.*does not exist"):
+            await validate_schema(schema, conn_with_mv)
+
+    async def test_introspect_schema_includes_mv(self, conn_with_mv):
+        """introspect_schema returns columns for materialized views."""
+        result = await introspect_schema(conn_with_mv, ["test_expenses_mv"])
+        assert "TABLE test_expenses_mv" in result
+        assert "user_id" in result
+        assert "usd_amount" in result
