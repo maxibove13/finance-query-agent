@@ -37,16 +37,13 @@ Users of financial applications need to ask natural language questions about the
 ```
 MPI Lambda ──> boto3 invoke ──> Agent Lambda
                                  ├── Pydantic AI Agent
-                                 │   ├── get_spending_by_category
-                                 │   ├── get_monthly_totals
-                                 │   ├── get_top_merchants
-                                 │   ├── compare_periods
+                                 │   ├── query_expenses          (view-backed)
+                                 │   ├── query_income            (view-backed)
+                                 │   ├── query_balance_history   (view-backed)
                                  │   ├── search_transactions
-                                 │   ├── get_category_breakdown
-                                 │   ├── get_spending_trend
-                                 │   ├── get_balance_summary
                                  │   ├── get_recurring_expenses
                                  │   └── [fallback] run_constrained_query
+                                 ├── Materialized Views (pre-computed, with currency conversion)
                                  ├── Query Builder (SchemaMapping → parameterized SQL)
                                  ├── asyncpg → RDS (read-only, single connection)
                                  ├── DynamoDB (encrypted conversation history)
@@ -215,96 +212,116 @@ Optional columns:
 
 | Concept | Column key | Type | Description |
 |---------|-----------|------|-------------|
-| Balance | `balance` | `numeric` | Running balance after transaction (enables `get_balance_summary`) |
+| Balance | `balance` | `numeric` | Running balance after transaction |
 
-### 6.6 `user_scoped` Flag
+### 6.6 `ViewMapping` — Pre-Computed Materialized Views
+
+The `SchemaMapping` supports three optional `ViewMapping` fields for pre-computed materialized views. When configured, they enable the view-backed tools (`query_expenses`, `query_income`, `query_balance_history`).
+
+```python
+class ViewMapping(BaseModel):
+    """Mapping for a pre-computed database view (e.g. materialized view with pre-joined exchange rates)."""
+    table: str
+    columns: dict[str, str]  # logical key -> actual column name
+```
+
+Each `ViewMapping` requires specific logical keys:
+
+| Field | Required logical keys |
+|-------|----------------------|
+| `unified_expenses` | `user_id`, `date`, `usd_amount`, `local_amount`, `category`, `merchant` |
+| `unified_income` | `user_id`, `month`, `usd_amount`, `local_amount` |
+| `unified_balances` | `user_id`, `date`, `usd_total`, `local_total` |
+
+These views are expected to contain pre-converted currency amounts (USD and local), pre-filtered data (e.g., excluding internal transfers), and pre-joined categories/merchants. The service validates required logical keys at startup.
+
+### 6.7 `user_scoped` Flag
 
 Tables that are shared/global (no `user_id` column) MUST set `user_scoped=False`. Default is `True`. The service will NOT inject user filtering on tables marked `user_scoped=False`. User isolation on transaction queries comes from the `user_id` mapping on the transactions table (whether direct or via `ColumnRef`).
 
-### 6.7 What the Service Derives from the Mapping
+### 6.8 What the Service Derives from the Mapping
 
 | Service gets | From |
 |----------|------|
-| All predefined tool queries | Column mappings + join definitions + amount convention |
+| View-backed tool queries | `ViewMapping` (unified_expenses, unified_income, unified_balances) |
+| Direct query tool SQL | Column mappings + join definitions + amount convention |
 | Expense/income filtering | `AmountConvention` on each transaction table |
 | Fallback SQL table/column allowlist | All mapped tables and columns (nothing else is queryable) |
 | Schema description for LLM context | Column names, types (introspected from DB), relationships |
 | User isolation `WHERE` clauses | The `user_id` column mapping (direct or via `ColumnRef` + JOIN) |
 | `UNION ALL` for multi-source queries | `transactions` + `secondary_transactions` with independent JOINs |
 
-### 6.8 Schema Validation
+### 6.9 Schema Validation
 
 On startup (first request), the service MUST:
-1. Connect to the database and verify all mapped tables and columns exist.
+1. Connect to the database and verify all mapped tables and columns exist (including `ViewMapping` tables).
 2. For tables with `user_scoped=True` (default): verify the `user_id` column exists, either directly or as a `ColumnRef` with a valid join path.
 3. For tables with `user_scoped=False`: skip user_id validation.
 4. Verify all `JoinDef` conditions reference valid columns on both sides.
 5. Verify all `ColumnRef` entries point to a table that has a corresponding `JoinDef`.
 6. Verify `AmountConvention` is set on every transaction table, references valid columns, and has exactly one of the two convention options set (direction column OR sign-based, not both, not neither).
-7. If `balance` column is not mapped, disable `get_balance_summary` and log a warning.
+7. Verify each `ViewMapping` has all required logical keys for its field.
 8. Raise a clear error if any mapping is invalid, specifying exactly which table/column is wrong.
 
 ## 7. Predefined Tools
 
-Each tool accepts typed parameters (Pydantic models) and returns structured results. The agent selects the tool and fills the parameters; the service's query builder generates and executes the SQL using the schema mapping.
+The agent has 6 tools: 3 view-backed aggregation tools, 2 direct query tools, and 1 constrained SQL fallback. The agent selects the tool and fills the parameters; the service generates and executes the SQL.
 
-**Note on query complexity:** Predefined tools may use CTEs, subqueries, and window functions internally. The "no subqueries" restriction (R7) applies only to the LLM-generated SQL in the fallback tool, not to the service's own query builder.
+View-backed tools (`query_expenses`, `query_income`, `query_balance_history`) query pre-computed materialized views configured via `ViewMapping`. They are conditionally registered — if the corresponding `ViewMapping` is not set in the `SchemaMapping`, the tool is hidden from the agent via a prepare callback that returns `None`.
 
-### 7.1 `get_spending_by_category`
+Direct query tools (`search_transactions`, `get_recurring_expenses`) use the `QueryBuilder` to generate parameterized SQL from the `SchemaMapping`.
 
-Returns total spending for one or more categories within a time period. Only counts expenses (uses `AmountConvention` to filter).
+### 7.1 `query_expenses`
+
+Aggregates expenses over a date range from a pre-computed materialized view. Replaces the previous `get_spending_by_category`, `get_monthly_totals`, `get_top_merchants`, `compare_periods`, `get_spending_trend`, and `get_category_breakdown` tools via the `group_by` parameter. Internal transfers and credit card payment double-counting are excluded by the view.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `period_start` | `date` | yes | Start of period (inclusive) |
 | `period_end` | `date` | yes | End of period (inclusive) |
-| `categories` | `list[str] \| None` | no | Filter to specific categories. `None` = all. |
-| `account_id` | `str \| None` | no | Filter to specific account. `None` = all. |
+| `group_by` | `"category" \| "month" \| "merchant" \| "total"` | no | Aggregation dimension (default `"total"`) |
+| `currency` | `"usd" \| "local"` | no | Pre-converted currency amounts (default `"usd"`) |
+| `category` | `str \| None` | no | Exact match filter on category |
+| `merchant` | `str \| None` | no | Substring match on merchant (ILIKE) |
+| `limit` | `int \| None` | no | Max rows returned |
 
-Returns: `list[CategorySpending]` — each with `category`, `total_amount`, `transaction_count`, `currency`. Results are grouped per currency when multiple currencies exist.
+Returns: `list[ExpenseGroup]` — each with `label`, `total_amount`, `transaction_count`, `currency`.
 
-### 7.2 `get_monthly_totals`
+**Conditional registration:** Only registered if `schema.unified_expenses` (`ViewMapping`) is configured.
 
-Returns aggregated expense totals per month. Only counts expenses.
+### 7.2 `query_income`
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `period_start` | `date` | yes | Start month |
-| `period_end` | `date` | yes | End month |
-| `account_id` | `str \| None` | no | Filter to specific account |
-
-Returns: `list[MonthlyTotal]` — each with `year`, `month`, `total_amount`, `transaction_count`, `currency`. One entry per (year, month, currency) combination.
-
-### 7.3 `get_top_merchants`
-
-Returns the merchants where the user spends the most. Only counts expenses.
+Monthly income totals over a date range from a pre-computed materialized view.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `period_start` | `date` | yes | Start of period |
-| `period_end` | `date` | yes | End of period |
-| `limit` | `int` | no | Number of merchants (default 10, max 50) |
-| `category` | `str \| None` | no | Filter to a specific category |
+| `period_start` | `date` | yes | Start of period (inclusive) |
+| `period_end` | `date` | yes | End of period (inclusive) |
+| `currency` | `"usd" \| "local"` | no | Pre-converted currency amounts (default `"usd"`) |
 
-Returns: `list[MerchantSpending]` — each with `merchant_name`, `total_amount`, `transaction_count`, `currency`. Ranked by `total_amount` descending within each currency.
+Returns: `list[IncomeMonth]` — each with `month_label` (`"YYYY/MM"`), `total_amount`, `currency`.
 
-### 7.4 `compare_periods`
+**Conditional registration:** Only registered if `schema.unified_income` (`ViewMapping`) is configured.
 
-Compares spending between two time periods. Only counts expenses.
+### 7.3 `query_balance_history`
+
+Balance snapshots from pre-computed materialized view, optionally with per-currency breakdown.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `period_a_start` | `date` | yes | First period start |
-| `period_a_end` | `date` | yes | First period end |
-| `period_b_start` | `date` | yes | Second period start |
-| `period_b_end` | `date` | yes | Second period end |
-| `group_by` | `"category" \| "merchant" \| "total"` | no | Grouping (default `"total"`) |
+| `period_start` | `date \| None` | no | Start of range. Omit for latest snapshot only. |
+| `period_end` | `date \| None` | no | End of range. Omit for latest snapshot only. |
+| `currency` | `"usd" \| "local"` | no | Total balance currency (default `"usd"`) |
+| `include_breakdown` | `bool` | no | Include per-currency JSONB breakdown (default `false`) |
+| `granularity` | `"daily" \| "monthly"` | no | `"monthly"` returns last snapshot per month (default `"monthly"`) |
 
-Returns: `list[PeriodComparison]` — one per (group, currency) combination. Each with `group_label`, `currency`, `period_a_total`, `period_b_total`, `absolute_change`, `percentage_change`.
+Returns: `list[BalanceSnapshot]` — each with `date`, `total_balance`, `currency_balances` (optional `dict[str, Decimal]`).
 
-### 7.5 `search_transactions`
+**Conditional registration:** Only registered if `schema.unified_balances` (`ViewMapping`) is configured.
 
-Searches transactions by description, amount range, date range, or category. Returns all transactions (expenses and income) unless filtered.
+### 7.4 `search_transactions`
+
+Searches individual transactions by description, amount range, date range, or category. Returns all transactions (expenses and income) unless filtered. Uses `QueryBuilder` to generate parameterized SQL from `SchemaMapping`.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -315,62 +332,14 @@ Searches transactions by description, amount range, date range, or category. Ret
 | `max_amount` | `float \| None` | no | Maximum absolute amount |
 | `category` | `str \| None` | no | Filter by category name |
 | `direction` | `"expense" \| "income" \| None` | no | Filter by direction. `None` = both. |
-| `limit` | `int` | no | Max results (default 20, max 100) |
+| `limit` | `int` | no | Max results (default 20) |
 | `offset` | `int` | no | Pagination offset |
 
-Text search uses `ILIKE '%query%'`. This is simple and works without special indexes. If the consuming app has a trigram GIN index, performance will be good on large tables; without one, scans are acceptable for the result set sizes typical of personal finance data (thousands, not millions of rows per user).
+Returns: `TransactionSearchResult` — with `transactions: list[Transaction]`, `total_count`, `has_more`. Each `Transaction` includes `date`, `amount`, `description`, `currency`, `category`.
 
-Returns: `TransactionSearchResult` — with `transactions: list[Transaction]`, `total_count`, `has_more`.
+### 7.5 `get_recurring_expenses`
 
-### 7.6 `get_category_breakdown`
-
-Returns a percentage breakdown of spending by category for a period. Only counts expenses.
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `period_start` | `date` | yes | Start of period |
-| `period_end` | `date` | yes | End of period |
-| `account_id` | `str \| None` | no | Filter to specific account |
-
-Returns: `list[CategoryBreakdown]` — each with `category`, `total_amount`, `percentage`, `currency`. Percentages are computed within each currency independently. Uncategorized transactions (null category) appear as `category: "Uncategorized"`.
-
-### 7.7 `get_spending_trend`
-
-Returns spending over time for a category or total. Only counts expenses.
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `period_start` | `date` | yes | Start |
-| `period_end` | `date` | yes | End |
-| `granularity` | `"week" \| "month"` | no | Time bucketing (default `"month"`) |
-| `category` | `str \| None` | no | Filter to category. `None` = total. |
-
-Returns: `list[TrendPoint]` — each with `period_label`, `total_amount`, `transaction_count`, `currency`.
-
-### 7.8 `get_balance_summary`
-
-Returns the most recent balance and activity summary per account. **Only available if `balance` column is mapped in the schema.**
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `account_id` | `str \| None` | no | Specific account or all |
-
-**Query pattern:** For each account, find the most recent transaction (by date) and return its `balance` value. Uses a window function internally:
-
-```sql
-SELECT DISTINCT ON (account_id) account_id, account_name, balance, date
-FROM transactions JOIN accounts ...
-WHERE user_id = $1
-ORDER BY account_id, date DESC
-```
-
-Returns: `list[AccountSummary]` — each with `account_name`, `latest_balance`, `last_transaction_date`, `currency`.
-
-If `balance` is not mapped in the schema, the service disables this tool (it is not registered with the agent) and logs a warning at startup.
-
-### 7.9 `get_recurring_expenses`
-
-Identifies recurring transactions (subscriptions, regular payments). Only counts expenses.
+Identifies recurring transactions (subscriptions, regular payments). Only counts expenses. Uses `QueryBuilder` to generate parameterized SQL from `SchemaMapping`.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -390,8 +359,6 @@ Identifies recurring transactions (subscriptions, regular payments). Only counts
       - Outside these ranges: `"irregular"` (excluded from results)
    c. Exclude groups where the coefficient of variation of intervals > 0.5 (too inconsistent to be a subscription).
 3. Return results sorted by `total_amount` descending.
-
-**Query pattern:** A single query with `GROUP BY description`, `COUNT(*)`, `array_agg(date ORDER BY date)`, and `percentile_cont(0.5) WITHIN GROUP (ORDER BY amount)`. Interval analysis and frequency classification happen in Python after the query returns, not in SQL.
 
 Returns: `list[RecurringExpense]` — each with `merchant_name`, `estimated_amount` (median), `frequency`, `occurrences`, `total_amount`, `currency`.
 
@@ -568,9 +535,9 @@ The consuming application decides how to present this to the user (chat UI, API 
 
 Financial data often spans multiple currencies. The service handles this consistently across all tools:
 
-- **Aggregation tools** (`get_spending_by_category`, `get_monthly_totals`, `get_top_merchants`, `compare_periods`, `get_category_breakdown`, `get_spending_trend`): Results are grouped per currency. The service never converts or sums across currencies. A user with USD and UYU transactions gets separate rows for each.
+- **View-backed tools** (`query_expenses`, `query_income`, `query_balance_history`): Support a `currency` parameter (`"usd"` or `"local"`) selecting pre-converted amounts from the materialized view. Results are returned in the selected currency denomination.
 - **Search tools** (`search_transactions`): Return the raw currency per transaction.
-- **Balance tool** (`get_balance_summary`): Returns per-account, which is inherently per-currency.
+- **Balance tool** (`query_balance_history`): Can optionally include a per-currency breakdown via `include_breakdown=True`.
 - **Recurring tool** (`get_recurring_expenses`): Groups by (description, currency) — a Netflix charge in USD and one in EUR are separate recurring items.
 - **LLM formatting**: The system prompt instructs the LLM to present multi-currency results clearly (e.g., "You spent $1,200 USD and $45,000 UYU on groceries last month").
 
@@ -605,9 +572,8 @@ finance-query-agent/
 │       ├── connection.py             <- asyncpg single connection (Lambda-aware)
 │       ├── tools/
 │       │   ├── __init__.py
-│       │   ├── spending.py           <- get_spending_by_category, get_monthly_totals, get_balance_summary
-│       │   ├── transactions.py       <- search_transactions, get_top_merchants
-│       │   ├── trends.py             <- compare_periods, get_spending_trend, get_category_breakdown
+│       │   ├── unified.py            <- query_expenses, query_income, query_balance_history (view-backed)
+│       │   ├── transactions.py       <- search_transactions
 │       │   ├── recurring.py          <- get_recurring_expenses (query + Python post-processing)
 │       │   └── fallback_sql.py       <- Constrained SQL generation tool
 │       ├── validation/
@@ -616,9 +582,9 @@ finance-query-agent/
 │       │   └── schema_validator.py   <- Validates SchemaMapping against live DB on startup
 │       └── schemas/
 │           ├── __init__.py
-│           ├── mapping.py            <- SchemaMapping, TableMapping, JoinDef, ColumnRef, AmountConvention
-│           ├── tool_params.py        <- Pydantic models for tool input parameters
-│           ├── tool_results.py       <- Pydantic models for tool return types
+│           ├── mapping.py            <- SchemaMapping, TableMapping, ViewMapping, JoinDef, ColumnRef
+│           ├── unified_results.py    <- ExpenseGroup, IncomeMonth, BalanceSnapshot
+│           ├── tool_results.py       <- Transaction, TransactionSearchResult, RecurringExpense
 │           └── responses.py          <- AgentResponse, ToolCallRecord, TokenUsage
 ├── tests/
 │   ├── test_query_builder.py         <- Unit tests for SQL generation from mappings

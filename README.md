@@ -12,10 +12,8 @@ graph LR
         direction TB
         subgraph PREDEFINED["Predefined Tools"]
             direction LR
-            S["get_spending_by_category\nget_monthly_totals\nget_balance_summary"]
-            T["search_transactions\nget_top_merchants"]
-            R["compare_periods\nget_spending_trend\nget_category_breakdown"]
-            P["get_recurring_expenses"]
+            V["query_expenses\nquery_income\nquery_balance_history"]
+            D["search_transactions\nget_recurring_expenses"]
         end
         FB["run_constrained_query\n(SQL fallback)"]
     end
@@ -31,8 +29,10 @@ graph LR
 
     VIZ_AGENT --> OUT_VIZ["Text + Chart Specs"]
 
-    PREDEFINED --> QB["QueryBuilder\n(SchemaMapping → SQL)"]
+    V --> MV[("Materialized Views\n(pre-computed)")]
+    D --> QB["QueryBuilder\n(SchemaMapping → SQL)"]
     QB --> PG[("PostgreSQL")]
+    MV --> PG
     FB --> PG
 
     style QUERY_AGENT fill:#2a2a3c,stroke:#88c,color:#fff
@@ -59,7 +59,7 @@ sequenceDiagram
     Dynamo-->>Lambda: Encrypted messages (Fernet)
 
     Lambda->>LLM: System prompt + history + question
-    LLM-->>Lambda: Tool call: get_spending_by_category(...)
+    LLM-->>Lambda: Tool call: query_expenses(...)
 
     Lambda->>PG: Parameterized SQL ($1, $2, ...)
     PG-->>Lambda: Query results
@@ -97,20 +97,17 @@ graph TB
             AGENT --> FALLBACK
 
             subgraph TOOLS["Predefined Tools"]
-                T1[get_spending_by_category]
-                T2[get_monthly_totals]
-                T3[get_balance_summary]
-                T4[get_top_merchants]
-                T5[search_transactions]
-                T6[compare_periods]
-                T7[get_spending_trend]
-                T8[get_category_breakdown]
-                T9[get_recurring_expenses]
+                T1[query_expenses]
+                T2[query_income]
+                T3[query_balance_history]
+                T4[search_transactions]
+                T5[get_recurring_expenses]
             end
 
             FALLBACK[run_constrained_query<br/><i>SQL fallback</i>]
             QB[QueryBuilder<br/><i>SchemaMapping → SQL</i>]
-            TOOLS --> QB
+            T4 --> QB
+            T5 --> QB
 
             AGENT -->|AnswerWithVisualization| VIZ
             VIZ[Visualization Agent<br/><i>visualization.py</i>]
@@ -150,10 +147,8 @@ graph LR
 
     subgraph PREDEFINED["Predefined Tools — Safe by Construction"]
         direction TB
-        S["Spending<br/>─────────────<br/>by_category<br/>monthly_totals<br/>balance_summary"]
-        X["Search<br/>─────────────<br/>transactions<br/>top_merchants"]
-        R["Trends<br/>─────────────<br/>compare_periods<br/>spending_trend<br/>category_breakdown"]
-        RC["Patterns<br/>─────────────<br/>recurring_expenses"]
+        V["View-Backed<br/>─────────────<br/>query_expenses<br/>query_income<br/>query_balance_history"]
+        D["Direct Query<br/>─────────────<br/>search_transactions<br/>get_recurring_expenses"]
     end
 
     subgraph CONSTRAINED["Constrained SQL — Validated + Sandboxed"]
@@ -166,8 +161,9 @@ graph LR
         V1 --> V2 --> V3 --> V4 --> V5
     end
 
-    PREDEFINED --> QB[QueryBuilder]
-    QB -->|"$1, $2, ..."| DB[(PostgreSQL)]
+    V -->|"$1, $2, ..."| DB[(PostgreSQL)]
+    D --> QB[QueryBuilder]
+    QB -->|"$1, $2, ..."| DB
     CONSTRAINED -->|"validated SQL"| DB
 
     style PREDEFINED fill:#2d5a3d,stroke:#4a9,color:#fff
@@ -176,7 +172,7 @@ graph LR
 
 ## Query Generation Pipeline
 
-All SQL is derived from a declarative `SchemaMapping` — no hand-written queries.
+View-backed tools (`query_expenses`, `query_income`, `query_balance_history`) query pre-computed materialized views directly. Direct query tools (`search_transactions`, `get_recurring_expenses`) use the `QueryBuilder` to generate SQL from `SchemaMapping`.
 
 ```mermaid
 graph LR
@@ -284,6 +280,7 @@ graph LR
         CAT["categories<br/>─────────────────<br/>table: tags<br/>columns: id, name<br/>user_scoped: false"]
         ACCT["accounts<br/>─────────────────<br/>table: accounts<br/>columns: id, name, user_id"]
         SEC["secondary_transactions<br/><i>(optional)</i><br/>─────────────────<br/>table: credit_card_movements<br/>independent joins + convention"]
+        VIEWS["unified views<br/><i>(optional)</i><br/>─────────────────<br/>unified_expenses<br/>unified_income<br/>unified_balances<br/><i>pre-computed materialized views</i>"]
     end
 
     SchemaMapping --> DERIVES
@@ -345,7 +342,7 @@ src/finance_query_agent/
 ├── visualization.py        Visualization agent (chart spec generation)
 ├── config.py               Settings from env vars
 ├── query_builder.py        SchemaMapping → parameterized SQL
-├── connection.py           asyncpg pool (cached, Lambda-aware)
+├── connection.py           asyncpg single connection (Lambda-aware)
 ├── memory.py               DynamoDB conversation history
 ├── encryption.py           Fernet field encryption
 ├── redaction.py            Regex PII scrubbing
@@ -353,19 +350,18 @@ src/finance_query_agent/
 ├── observability.py        Logfire + scrubbing callback
 ├── exceptions.py           Exception hierarchy
 ├── tools/
-│   ├── spending.py         by_category, monthly_totals, balance_summary
-│   ├── transactions.py     search_transactions, top_merchants
-│   ├── trends.py           compare_periods, spending_trend, category_breakdown
+│   ├── unified.py          query_expenses, query_income, query_balance_history (view-backed)
+│   ├── transactions.py     search_transactions
 │   ├── recurring.py        get_recurring_expenses
 │   └── fallback_sql.py     Constrained SQL generation
 ├── validation/
 │   ├── sql_validator.py    Keyword rejection, allowlist, LIMIT injection
 │   └── schema_validator.py Validates mapping against live DB
 └── schemas/
-    ├── mapping.py          SchemaMapping, TableMapping, JoinDef, ColumnRef
+    ├── mapping.py          SchemaMapping, TableMapping, ViewMapping, JoinDef, ColumnRef
     ├── charts.py           Chart specs (pie, bar, line, grouped_bar)
-    ├── tool_params.py      Tool input parameter models
-    ├── tool_results.py     Tool return type models
+    ├── unified_results.py  ExpenseGroup, IncomeMonth, BalanceSnapshot
+    ├── tool_results.py     Transaction, TransactionSearchResult, RecurringExpense
     └── responses.py        AgentResponse, AgentOutput, ChartSpec
 ```
 
