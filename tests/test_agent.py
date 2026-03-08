@@ -32,6 +32,16 @@ class TestBuildSystemPrompt:
         assert "final_answer" in prompt
         assert "visualization agent" in prompt
 
+    def test_includes_currency_guidance(self) -> None:
+        prompt = build_system_prompt()
+        assert '"local"' in prompt
+        assert '"usd"' in prompt
+        assert "Never convert amounts yourself" in prompt
+
+    def test_includes_language_mirroring(self) -> None:
+        prompt = build_system_prompt()
+        assert "same language" in prompt
+
     def test_no_deleted_tool_references(self) -> None:
         prompt = build_system_prompt()
         for deleted in (
