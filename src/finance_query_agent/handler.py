@@ -93,7 +93,7 @@ async def _process_request(body: dict[str, Any]) -> AgentResponse:
         if user_id <= 0:
             raise ValueError(f"user_id must be a positive integer, got {user_id}")
     else:
-        user_id = str(raw_user_id)
+        raise ValueError(f"user_id must be a positive integer, got {raw_user_id!r}")
 
     encryptor = FieldEncryptor(settings.encryption_key)
     memory = ConversationMemory(settings.dynamodb_table, settings.dynamodb_region, encryptor)
@@ -106,11 +106,12 @@ async def _process_request(body: dict[str, Any]) -> AgentResponse:
         if not _initialized:
             from finance_query_agent.observability import initialize
 
-            _initialized = initialize()
+            initialize()
             await conn.verify_rls_enabled(
                 ["accounts", "credit_cards", "account_movements", "credit_card_movements"],
                 strict=settings.aws_lambda_function_name is not None,
             )
+            _initialized = True
 
         # Load conversation history (DynamoDB always uses string keys)
         history = await memory.load_history(str(raw_user_id), session_id)

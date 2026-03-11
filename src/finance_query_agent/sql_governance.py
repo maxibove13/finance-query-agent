@@ -45,8 +45,13 @@ def _walk_and_check(statement: exp.Expression) -> None:
     for node in statement.walk():
         if isinstance(node, _FORBIDDEN):
             raise ValueError(f"SQL contains a forbidden statement type: {type(node).__name__}")
-        if isinstance(node, exp.Join) and node.args.get("kind", "").upper() == "CROSS":
-            raise ValueError("CROSS JOIN is not allowed")
+        if isinstance(node, exp.Join):
+            kind = node.args.get("kind", "")
+            # Explicit CROSS JOIN or implicit comma join (FROM a, b — no ON/USING clause)
+            if kind and kind.upper() == "CROSS":
+                raise ValueError("CROSS JOIN is not allowed")
+            if not kind and not node.args.get("on") and not node.args.get("using"):
+                raise ValueError("Implicit comma join (FROM a, b) is not allowed; use explicit JOIN with ON")
         if isinstance(node, exp.Anonymous) and node.this.lower() == "set_config":
             raise ValueError("set_config() is not allowed in queries")
 

@@ -99,6 +99,10 @@ class TestValidSelectOnly:
         with pytest.raises(ValueError, match="(?i)cross join"):
             validate_select_only("SELECT * FROM accounts CROSS JOIN account_movements LIMIT 100")
 
+    def test_comma_join_raises(self) -> None:
+        with pytest.raises(ValueError, match="(?i)comma join"):
+            validate_select_only("SELECT * FROM accounts, account_movements LIMIT 100")
+
     def test_select_without_limit_raises(self) -> None:
         with pytest.raises(ValueError, match="(?i)limit"):
             validate_select_only("SELECT * FROM account_movements")

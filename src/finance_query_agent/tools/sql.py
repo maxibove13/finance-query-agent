@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import datetime
+import decimal
 import time
 from typing import Any
 
@@ -10,6 +12,19 @@ from pydantic_ai import RunContext
 from finance_query_agent.schemas.responses import ToolCallRecord
 from finance_query_agent.sql_governance import validate_select_only
 from finance_query_agent.tools import AgentDeps
+
+
+def _normalize_row(row: dict[str, Any]) -> dict[str, Any]:
+    """Convert asyncpg-specific types to JSON-safe equivalents."""
+    return {k: _normalize_value(v) for k, v in row.items()}
+
+
+def _normalize_value(v: Any) -> Any:
+    if isinstance(v, decimal.Decimal):
+        return float(v)
+    if isinstance(v, (datetime.date, datetime.datetime)):
+        return v.isoformat()
+    return v
 
 
 async def execute_sql(ctx: RunContext[AgentDeps], sql: str) -> list[dict[str, Any]]:
@@ -25,7 +40,7 @@ async def execute_sql(ctx: RunContext[AgentDeps], sql: str) -> list[dict[str, An
     rows = await ctx.deps.connection.execute_governed(sql, ctx.deps.user_id)
     elapsed_ms = int((time.monotonic() - start) * 1000)
 
-    result = [dict(row) for row in rows]
+    result = [_normalize_row(dict(row)) for row in rows]
 
     ctx.deps.tool_calls.append(
         ToolCallRecord(
