@@ -9,354 +9,81 @@ The app already handles the full import flow — upload, text extraction, AI par
 Rather than building this capability as a tightly coupled feature inside the app, we're extracting it into a standalone service. This serves two purposes:
 
 1. **For the app**: adds a differentiating, monetizable feature — an AI financial assistant that answers spending questions with reliable, auditable results.
-2. **For the community**: provides a reusable, deployable service that any application with a financial database can integrate by providing a schema mapping, without writing query logic.
+2. **For the community**: provides a reusable, deployable service that any application with a financial database can integrate by providing a schema document, without writing query logic.
 
 The service is designed as the first consumer's needs dictate (our app's schema, our data model's quirks), but generic enough that other financial applications can adopt it.
 
 ## 2. Problem Statement
 
-Users of financial applications need to ask natural language questions about their data ("How much did I spend on groceries last month?", "Compare my spending this month vs last month"). Building this as raw text-to-SQL is unreliable — wrong JOINs, hallucinated column names, and plausible-but-incorrect results erode trust. A tools-based agent with predefined, parameterized query operations provides reliable, auditable results.
+Users of financial applications need to ask natural language questions about their data ("How much did I spend on groceries last month?", "Compare my spending this month vs last month"). The service uses a **text-to-SQL** architecture with a governance layer to ensure generated SQL is safe, scoped to the requesting user, and consistent with the documented schema.
 
 ## 3. Goals
 
 - Provide a **deployed financial query service** (`finance-query-agent`) that any application with a financial database can integrate via HTTP.
 - Use **Pydantic AI** as the agent framework.
-- Implement a **tools-as-wrappers** architecture: the LLM selects which tool to call and with what parameters; the tool executes a predefined, parameterized query.
-- **Configuration-driven integration**: clients provide a declarative schema mapping (table names, column names, joins). The service generates all queries internally. No adapter code to write.
+- Implement a **text-to-SQL** architecture: the LLM writes SQL against a schema documented in `schema.yaml`; a governance layer validates every query before execution.
+- **Schema documentation**: the DB schema, business rules, and example queries are documented in `schema.yaml` and injected into the system prompt. No client-side adapter code required.
 
 ## 4. Non-Goals
 
-- Not a BI/analytics platform. No dashboards, no visualizations, no semantic layer.
 - No write operations. The agent is strictly read-only.
-- No multi-database support in v1. PostgreSQL only. The schema mapping approach allows future database backends.
-- No custom tool overrides or extension points. The service provides a fixed set of predefined tools.
+- No multi-database support in v1. PostgreSQL only.
+- No custom tool overrides or extension points.
 
 ## 5. Architecture
 
 ```
 MPI Lambda ──> boto3 invoke ──> Agent Lambda
                                  ├── Pydantic AI Agent
-                                 │   ├── query_expenses          (view-backed)
-                                 │   ├── query_income            (view-backed)
-                                 │   ├── query_balance_history   (view-backed)
-                                 │   ├── search_transactions
-                                 │   └── get_recurring_expenses
-                                 ├── Materialized Views (pre-computed, with currency conversion)
-                                 ├── Query Builder (SchemaMapping → parameterized SQL)
+                                 │   └── execute_sql  (single SQL tool)
+                                 ├── SQL Governance (validate_select_only)
+                                 ├── schema.yaml (DB schema injected into system prompt)
                                  ├── asyncpg → RDS (read-only, single connection)
                                  ├── DynamoDB (encrypted conversation history)
                                  └── Logfire (PII-scrubbed traces)
 ```
 
-**The service owns:** agent definition, tool definitions, query building, prompt engineering, response formatting, database connection management, conversation memory, observability, PII protection.
+**The service owns:** agent definition, tool definition, SQL governance, prompt engineering, response formatting, database connection management, conversation memory, observability, PII protection.
 
-**The consuming app owns:** schema mapping configuration (via Terraform), authentication, user identity, and Lambda invocation (via boto3).
+**The consuming app owns:** authentication, user identity, and Lambda invocation (via boto3).
 
-## 6. Schema Mapping (Client Integration)
+## 6. Schema Documentation
 
-This is the only thing a client needs to provide. A declarative configuration that tells the service where financial data lives in their database. Stored in SSM Parameter Store at `/<project-name>/schema-config` (or locally via `SCHEMA_CONFIG_JSON` env var / `SCHEMA_CONFIG_PATH` file).
+`schema.yaml` in `src/finance_query_agent/` is the single source of truth for the database schema exposed to the LLM. It documents:
 
-### 6.1 Configuration Model
+- Table names and their purpose
+- Column names and types
+- Business rules (e.g., how to distinguish expenses from income, what constitutes a transfer)
+- Example queries
 
-```python
-from finance_query_agent import (
-    SchemaMapping,
-    TableMapping,
-    JoinDef,
-    ColumnRef,
-    AmountConvention,
-)
+It is read at startup and injected verbatim into the system prompt on every invocation. The LLM uses it to write valid SQL against the actual schema.
 
-schema = SchemaMapping(
-    # Primary transaction table (required)
-    transactions=TableMapping(
-        table="account_movements",
-        columns={
-            "date": "issued_at",
-            "amount": "amount",
-            "description": "description",
-            "user_id": ColumnRef("accounts", "user_id"),   # lives on parent table
-            "currency": ColumnRef("accounts", "currency"),  # lives on parent table
-            "account_id": "account_id",
-            "balance": "balance",                           # running balance after tx
-        },
-        joins=[
-            JoinDef(
-                table="accounts",
-                on="account_movements.account_id = accounts.id",
-                type="inner",
-            ),
-            JoinDef(
-                table="tags",
-                on="account_movements.category_id = tags.id",
-                type="left",  # nullable category_id — LEFT JOIN preserves uncategorized
-            ),
-        ],
-        amount_convention=AmountConvention(
-            # How to distinguish expenses from income
-            direction_column="movement_direction",
-            expense_value="debit",
-            income_value="credit",
-        ),
-    ),
+## 7. SQL Tool & Governance
 
-    # Category table (required)
-    categories=TableMapping(
-        table="tags",
-        columns={
-            "id": "id",
-            "name": "name",
-        },
-        # No user_id — categories are shared/global. Marked explicitly:
-        user_scoped=False,
-    ),
+### 7.1 `execute_sql`
 
-    # Account table (required)
-    accounts=TableMapping(
-        table="accounts",
-        columns={
-            "id": "id",
-            "name": "alias",                # nullable — some accounts may not have a display name
-            "user_id": "user_id",
-        },
-    ),
+The agent has exactly one tool: `execute_sql`. The LLM writes a SELECT query against the tables documented in `schema.yaml`. The tool passes the SQL through the governance layer before executing it.
 
-    # Secondary transaction table (optional — e.g. credit cards)
-    secondary_transactions=TableMapping(
-        table="credit_card_movements",
-        columns={
-            "date": "issued_at",
-            "amount": "amount",
-            "description": "description",
-            "user_id": ColumnRef("credit_cards", "user_id"),
-            "currency": "currency",            # direct column here
-            "account_id": "credit_card_id",
-        },
-        joins=[
-            JoinDef(
-                table="credit_cards",
-                on="credit_card_movements.credit_card_id = credit_cards.id",
-                type="inner",
-            ),
-            JoinDef(
-                table="tags",
-                on="credit_card_movements.category_id = tags.id",
-                type="left",
-            ),
-        ],
-        amount_convention=AmountConvention(
-            direction_column="movement_direction",
-            expense_value="debit",
-            income_value="credit",
-        ),
-    ),
-)
-```
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `sql` | `str` | A SELECT query written by the LLM |
 
-### 6.2 `ColumnRef` — Referencing Columns on Joined Tables
+Returns: query result rows as a list of dicts.
 
-When a column lives on a parent table (not directly on the transaction table), use `ColumnRef`:
+### 7.2 `validate_select_only` — Governance Rules
 
-```python
-class ColumnRef:
-    table: str   # The joined table name
-    column: str  # The column on that table
-```
+All LLM-generated SQL passes through `validate_select_only` in `sql_governance.py` before touching the database. It enforces six rules:
 
-The service resolves `ColumnRef` by finding the matching `JoinDef` in the table's `joins` list. If no join to the referenced table exists, schema validation fails at startup.
+| Rule | Description |
+|------|-------------|
+| SELECT-only | Rejects any statement that is not a SELECT (no INSERT, UPDATE, DELETE, DDL) |
+| LIMIT required | Every query must include a LIMIT clause |
+| user_id injection | The service strips any LLM-supplied `user_id` conditions and injects `WHERE user_id = $1` (parameterized) |
+| No CROSS JOIN | Blocks CROSS JOINs and comma-separated table lists in FROM (accidental cross products) |
+| No `set_config()` | Blocks attempts to call PostgreSQL's `set_config()` function |
+| asyncpg type normalization | Normalizes asyncpg-specific types (e.g., `asyncpg.pgproto.UUID`) to JSON-serializable Python types before returning results |
 
-### 6.3 `AmountConvention` — Expense vs. Income
-
-Financial databases represent transaction direction differently. The service supports two conventions:
-
-```python
-class AmountConvention:
-    # Option A: separate direction column (e.g. CREDIT/DEBIT enum)
-    direction_column: str | None = None
-    expense_value: str | None = None
-    income_value: str | None = None
-
-    # Option B: sign-based (positive = expense or positive = income)
-    sign_means_expense: Literal["positive", "negative"] | None = None
-```
-
-Exactly one of the two options must be set — schema validation rejects configurations where both are set or neither is set. The service uses this to generate the correct `WHERE` clause when filtering for expenses (all spending tools) or income. When a tool needs "total spending," the service filters to expenses only. When a tool needs "all transactions" (e.g., `search_transactions`), no direction filter is applied.
-
-### 6.4 `JoinDef` — Table Joins
-
-```python
-class JoinDef:
-    table: str                                    # Table to join
-    on: str                                       # Join condition
-    type: Literal["inner", "left"] = "left"       # Join type (default LEFT to preserve rows)
-```
-
-Each `TableMapping` has a `joins` list. The query builder applies all joins when querying that table. When building `UNION ALL` across primary and secondary transactions, each side uses its own join definitions independently.
-
-### 6.5 Required Column Mappings
-
-| Concept | Column key | Type | Where | Description |
-|---------|-----------|------|-------|-------------|
-| Transaction date | `date` | `date` or `timestamp` | transactions | When the transaction occurred |
-| Amount | `amount` | `numeric` | transactions | Transaction amount |
-| Description | `description` | `text` | transactions | Merchant name or transaction description |
-| Currency | `currency` | `text` | transactions or via `ColumnRef` | ISO currency code |
-| User ID | `user_id` | `text` or `uuid` | transactions or via `ColumnRef` | Row-level user ownership |
-| Account ID | `account_id` | `text` or `uuid` | transactions | FK to accounts table |
-| Category ID | `id` (on categories) | `text` or `uuid` | categories | Category primary key |
-| Category name | `name` (on categories) | `text` | categories | Human-readable category name |
-
-Optional columns:
-
-| Concept | Column key | Type | Description |
-|---------|-----------|------|-------------|
-| Balance | `balance` | `numeric` | Running balance after transaction |
-
-### 6.6 `ViewMapping` — Pre-Computed Materialized Views
-
-The `SchemaMapping` supports three optional `ViewMapping` fields for pre-computed materialized views. When configured, they enable the view-backed tools (`query_expenses`, `query_income`, `query_balance_history`).
-
-```python
-class ViewMapping(BaseModel):
-    """Mapping for a pre-computed database view (e.g. materialized view with pre-joined exchange rates)."""
-    table: str
-    columns: dict[str, str]  # logical key -> actual column name
-```
-
-Each `ViewMapping` requires specific logical keys:
-
-| Field | Required logical keys |
-|-------|----------------------|
-| `unified_expenses` | `user_id`, `date`, `usd_amount`, `local_amount`, `category`, `merchant` |
-| `unified_income` | `user_id`, `month`, `usd_amount`, `local_amount` |
-| `unified_balances` | `user_id`, `date`, `usd_total`, `local_total` |
-
-These views are expected to contain pre-converted currency amounts (USD and local), pre-filtered data (e.g., excluding internal transfers), and pre-joined categories/merchants. The service validates required logical keys at startup.
-
-### 6.7 `user_scoped` Flag
-
-Tables that are shared/global (no `user_id` column) MUST set `user_scoped=False`. Default is `True`. The service will NOT inject user filtering on tables marked `user_scoped=False`. User isolation on transaction queries comes from the `user_id` mapping on the transactions table (whether direct or via `ColumnRef`).
-
-### 6.8 What the Service Derives from the Mapping
-
-| Service gets | From |
-|----------|------|
-| View-backed tool queries | `ViewMapping` (unified_expenses, unified_income, unified_balances) |
-| Direct query tool SQL | Column mappings + join definitions + amount convention |
-| Expense/income filtering | `AmountConvention` on each transaction table |
-| User isolation `WHERE` clauses | The `user_id` column mapping (direct or via `ColumnRef` + JOIN) |
-| `UNION ALL` for multi-source queries | `transactions` + `secondary_transactions` with independent JOINs |
-
-### 6.9 Schema Validation
-
-On startup (first request), the service MUST:
-1. Connect to the database and verify all mapped tables and columns exist (including `ViewMapping` tables).
-2. For tables with `user_scoped=True` (default): verify the `user_id` column exists, either directly or as a `ColumnRef` with a valid join path.
-3. For tables with `user_scoped=False`: skip user_id validation.
-4. Verify all `JoinDef` conditions reference valid columns on both sides.
-5. Verify all `ColumnRef` entries point to a table that has a corresponding `JoinDef`.
-6. Verify `AmountConvention` is set on every transaction table, references valid columns, and has exactly one of the two convention options set (direction column OR sign-based, not both, not neither).
-7. Verify each `ViewMapping` has all required logical keys for its field.
-8. Raise a clear error if any mapping is invalid, specifying exactly which table/column is wrong.
-
-## 7. Predefined Tools
-
-The agent has 5 predefined tools: 3 view-backed aggregation tools and 2 direct query tools. The agent selects the tool and fills the parameters; the service generates and executes parameterized SQL.
-
-View-backed tools (`query_expenses`, `query_income`, `query_balance_history`) query pre-computed materialized views configured via `ViewMapping`. They are conditionally registered — if the corresponding `ViewMapping` is not set in the `SchemaMapping`, the tool is hidden from the agent via a prepare callback that returns `None`.
-
-Direct query tools (`search_transactions`, `get_recurring_expenses`) use the `QueryBuilder` to generate parameterized SQL from the `SchemaMapping`.
-
-### 7.1 `query_expenses`
-
-Aggregates expenses over a date range from a pre-computed materialized view. Replaces the previous `get_spending_by_category`, `get_monthly_totals`, `get_top_merchants`, `compare_periods`, `get_spending_trend`, and `get_category_breakdown` tools via the `group_by` parameter. Internal transfers and credit card payment double-counting are excluded by the view.
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `period_start` | `date` | yes | Start of period (inclusive) |
-| `period_end` | `date` | yes | End of period (inclusive) |
-| `group_by` | `"category" \| "month" \| "merchant" \| "total"` | no | Aggregation dimension (default `"total"`) |
-| `currency` | `"usd" \| "local"` | no | Pre-converted currency amounts (default `"usd"`) |
-| `category` | `str \| None` | no | Exact match filter on category |
-| `merchant` | `str \| None` | no | Substring match on merchant (ILIKE) |
-| `limit` | `int \| None` | no | Max rows returned |
-
-Returns: `list[ExpenseGroup]` — each with `label`, `total_amount`, `transaction_count`, `currency`.
-
-**Conditional registration:** Only registered if `schema.unified_expenses` (`ViewMapping`) is configured.
-
-### 7.2 `query_income`
-
-Monthly income totals over a date range from a pre-computed materialized view.
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `period_start` | `date` | yes | Start of period (inclusive) |
-| `period_end` | `date` | yes | End of period (inclusive) |
-| `currency` | `"usd" \| "local"` | no | Pre-converted currency amounts (default `"usd"`) |
-
-Returns: `list[IncomeMonth]` — each with `month_label` (`"YYYY/MM"`), `total_amount`, `currency`.
-
-**Conditional registration:** Only registered if `schema.unified_income` (`ViewMapping`) is configured.
-
-### 7.3 `query_balance_history`
-
-Balance snapshots from pre-computed materialized view, optionally with per-currency breakdown.
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `period_start` | `date \| None` | no | Start of range. Omit for latest snapshot only. |
-| `period_end` | `date \| None` | no | End of range. Omit for latest snapshot only. |
-| `currency` | `"usd" \| "local"` | no | Total balance currency (default `"usd"`) |
-| `include_breakdown` | `bool` | no | Include per-currency JSONB breakdown (default `false`) |
-| `granularity` | `"daily" \| "monthly"` | no | `"monthly"` returns last snapshot per month (default `"monthly"`) |
-
-Returns: `list[BalanceSnapshot]` — each with `date`, `total_balance`, `currency_balances` (optional `dict[str, Decimal]`).
-
-**Conditional registration:** Only registered if `schema.unified_balances` (`ViewMapping`) is configured.
-
-### 7.4 `search_transactions`
-
-Searches individual transactions by description, amount range, date range, or category. Returns all transactions (expenses and income) unless filtered. Uses `QueryBuilder` to generate parameterized SQL from `SchemaMapping`.
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `query` | `str \| None` | no | Text search on description (case-insensitive `ILIKE '%query%'`) |
-| `period_start` | `date \| None` | no | Start of period |
-| `period_end` | `date \| None` | no | End of period |
-| `min_amount` | `float \| None` | no | Minimum absolute amount |
-| `max_amount` | `float \| None` | no | Maximum absolute amount |
-| `category` | `str \| None` | no | Filter by category name |
-| `direction` | `"expense" \| "income" \| None` | no | Filter by direction. `None` = both. |
-| `limit` | `int` | no | Max results (default 20) |
-| `offset` | `int` | no | Pagination offset |
-
-Returns: `TransactionSearchResult` — with `transactions: list[Transaction]`, `total_count`, `has_more`. Each `Transaction` includes `date`, `amount`, `description`, `currency`, `category`.
-
-### 7.5 `get_recurring_expenses`
-
-Identifies recurring transactions (subscriptions, regular payments). Only counts expenses. Uses `QueryBuilder` to generate parameterized SQL from `SchemaMapping`.
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `period_start` | `date` | yes | Start of analysis window |
-| `period_end` | `date` | yes | End of analysis window |
-| `min_occurrences` | `int` | no | Minimum times a charge must appear (default 3) |
-
-**Detection algorithm:**
-
-1. Group expense transactions by normalized description (lowercase, trimmed).
-2. For each group with >= `min_occurrences` transactions in the period:
-   a. Compute the median amount and the median interval (in days) between consecutive transactions.
-   b. Classify frequency based on median interval:
-      - 5-10 days: `"weekly"`
-      - 25-35 days: `"monthly"`
-      - 340-395 days: `"yearly"`
-      - Outside these ranges: `"irregular"` (excluded from results)
-   c. Exclude groups where the coefficient of variation of intervals > 0.5 (too inconsistent to be a subscription).
-3. Return results sorted by `total_amount` descending.
-
-Returns: `list[RecurringExpense]` — each with `merchant_name`, `estimated_amount` (median), `frequency`, `occurrences`, `total_amount`, `currency`.
+Any rule violation raises a `GovernanceError` (subclass of `FinanceQueryError`), which is returned to the LLM as a tool error so it can retry with a corrected query.
 
 ## 8. Agent Configuration
 
@@ -378,7 +105,6 @@ Configuration is via environment variables (set by Terraform):
 
 | Variable | Description |
 |----------|-------------|
-| `SCHEMA_CONFIG_SSM_PARAM` | SSM parameter name for SchemaMapping JSON (set by Terraform) |
 | `QUERY_MODEL` | Pydantic AI model string (default: `openai:gpt-4o`) |
 | `DYNAMODB_TABLE` | DynamoDB table for conversation memory |
 | `DB_CREDENTIALS_SECRET_ARN` | Secrets Manager ARN for DB credentials |
@@ -392,37 +118,17 @@ The Lambda uses a single `asyncpg.connect()` per invocation (no pool). This matc
 
 **Database URL format:** Raw `asyncpg` format: `postgresql://user:pass@host:port/dbname`. Resolved from Secrets Manager at runtime (JSON secret with `username`, `password`, `host`, `port`, `dbname`).
 
-### 8.1.2 `run()` Method
-
-```python
-async def run(
-    self,
-    question: str,              # Natural language question
-    user_id: str,               # User ID for row-level isolation
-) -> AgentResponse:
-    """
-    Run the agent on a natural language question.
-
-    Raises:
-        FinanceQueryError: Base exception for all service errors.
-        DatabaseConnectionError: Pool not connected or DB unreachable.
-        QueryTimeoutError: A query exceeded the configured timeout.
-        LLMError: LLM API call failed (rate limit, auth, network).
-        SchemaValidationError: Schema mapping is invalid (raised during connect()).
-    """
-```
-
-### 8.1.3 Exception Hierarchy
+### 8.1.2 Exception Hierarchy
 
 ```python
 class FinanceQueryError(Exception):
     """Base exception for all service errors."""
 
-class SchemaValidationError(FinanceQueryError):
-    """Schema mapping does not match the live database."""
+class GovernanceError(FinanceQueryError):
+    """LLM-generated SQL failed governance validation."""
 
 class DatabaseConnectionError(FinanceQueryError):
-    """Database connection pool error (creation, health, closure)."""
+    """Database connection error (creation, health, closure)."""
 
 class QueryTimeoutError(FinanceQueryError):
     """A query exceeded the configured timeout."""
@@ -431,7 +137,7 @@ class LLMError(FinanceQueryError):
     """LLM API call failed (rate limit, auth, network, unexpected response)."""
 ```
 
-All exceptions inherit from `FinanceQueryError` so consumers can catch broadly or narrowly. Raw `asyncpg` and `httpx` exceptions are never surfaced directly.
+All exceptions inherit from `FinanceQueryError` so consumers can catch broadly or narrowly.
 
 ### 8.2 Hooks
 
@@ -465,8 +171,11 @@ class ToolCallEvent:
 The default system prompt MUST:
 - Identify the agent as a financial data assistant.
 - **Inject the current date** (e.g., "Today is 2026-03-03") so the LLM can resolve relative dates ("last month" -> February 2026).
-- Instruct the LLM to resolve relative dates to absolute `date` values before calling tools.
-- Instruct the LLM to ask clarifying questions (via a structured response) when the user's query is ambiguous, rather than guessing.
+- **Inject the full contents of `schema.yaml`** so the LLM knows the database schema.
+- Instruct the LLM to resolve relative dates to absolute `date` values before writing SQL.
+- Instruct the LLM to always include a LIMIT in every query.
+- Instruct the LLM to never include `user_id` conditions (the service injects them).
+- Instruct the LLM to ask clarifying questions when the user's query is ambiguous.
 - Instruct the LLM to format monetary values with currency symbols and two decimal places.
 - Instruct the LLM to never fabricate data — if a tool returns empty results, say so.
 - Be fully replaceable via `system_prompt_override`.
@@ -496,22 +205,16 @@ The consuming application decides how to present this to the user (chat UI, API 
 
 ## 10. Multi-Currency Behavior
 
-Financial data often spans multiple currencies. The service handles this consistently across all tools:
-
-- **View-backed tools** (`query_expenses`, `query_income`, `query_balance_history`): Support a `currency` parameter (`"usd"` or `"local"`) selecting pre-converted amounts from the materialized view. Results are returned in the selected currency denomination.
-- **Search tools** (`search_transactions`): Return the raw currency per transaction.
-- **Balance tool** (`query_balance_history`): Can optionally include a per-currency breakdown via `include_breakdown=True`.
-- **Recurring tool** (`get_recurring_expenses`): Groups by (description, currency) — a Netflix charge in USD and one in EUR are separate recurring items.
-- **LLM formatting**: The system prompt instructs the LLM to present multi-currency results clearly (e.g., "You spent $1,200 USD and $45,000 UYU on groceries last month").
+Financial data often spans multiple currencies. The LLM is aware of this via the schema documentation and is instructed to present multi-currency results clearly (e.g., "You spent $1,200 USD and $45,000 UYU on groceries last month"). The `execute_sql` tool returns raw per-transaction currency values; the LLM formats and groups them in the answer.
 
 ## 11. Security Requirements
 
 | Requirement | Description |
 |-------------|-------------|
-| **S1 — User isolation** | Every query is scoped to a `user_id`. The service injects user filtering using the mapped `user_id` column (direct or via `ColumnRef` + JOIN). Tables marked `user_scoped=False` (e.g., shared category tables) are not filtered. The LLM never controls user scoping. |
+| **S1 — User isolation** | Every query is scoped to a `user_id`. The governance layer strips any LLM-supplied `user_id` conditions and injects `WHERE user_id = $1` (parameterized). The LLM never controls user scoping. |
 | **S2 — No credential exposure** | The `database_url` is resolved from Secrets Manager at runtime. The service never logs or transmits connection strings. |
-| **S3 — Read-only** | No tool can modify data. Enforced at connection level (read-only DB role, the security boundary). |
-| **S4 — Input sanitization** | Tool parameters are validated via Pydantic models. All queries use parameterized values (`$1`, `$2`, etc.). |
+| **S3 — Read-only** | No tool can modify data. Enforced at DB role level (the security boundary) and reinforced by the SQL governance layer (SELECT-only enforcement). |
+| **S4 — Input sanitization** | All queries use parameterized values (`$1`, `$2`, etc.). The governance layer validates SQL structure before execution (AST-level SELECT-only check, LIMIT required, no CROSS JOIN, no `set_config()`). |
 | **S5 — PII in LLM context** | Transaction descriptions sent to the LLM may contain PII (merchant names, amounts). The consuming application is responsible for PII handling policy via the `pre_llm_hook`. |
 
 ## 12. Observability Requirements
@@ -529,33 +232,21 @@ Financial data often spans multiple currencies. The service handles this consist
 finance-query-agent/
 ├── src/
 │   └── finance_query_agent/
-│       ├── __init__.py               <- Package exports: SchemaMapping, exceptions, etc.
-│       ├── agent.py                  <- Pydantic AI agent definition
-│       ├── query_builder.py          <- Generates parameterized SQL from SchemaMapping + tool params
+│       ├── __init__.py               <- Package exports and exceptions
+│       ├── agent.py                  <- Pydantic AI agent definition + system prompt
+│       ├── sql_governance.py         <- validate_select_only (6 governance rules)
+│       ├── schema.yaml               <- DB schema documentation injected into system prompt
 │       ├── connection.py             <- asyncpg single connection (Lambda-aware)
 │       ├── tools/
-│       │   ├── __init__.py
-│       │   ├── unified.py            <- query_expenses, query_income, query_balance_history (view-backed)
-│       │   ├── transactions.py       <- search_transactions
-│       │   └── recurring.py          <- get_recurring_expenses (query + Python post-processing)
-│       ├── validation/
-│       │   ├── __init__.py
-│       │   └── schema_validator.py   <- Validates SchemaMapping against live DB on startup
+│       │   └── sql.py                <- execute_sql tool + asyncpg type normalization
 │       └── schemas/
-│           ├── __init__.py
-│           ├── mapping.py            <- SchemaMapping, TableMapping, ViewMapping, JoinDef, ColumnRef
-│           ├── unified_results.py    <- ExpenseGroup, IncomeMonth, BalanceSnapshot
-│           ├── tool_results.py       <- Transaction, TransactionSearchResult, RecurringExpense
+│           ├── charts.py             <- Chart specs (pie, bar, line, grouped_bar)
 │           └── responses.py          <- AgentResponse, ToolCallRecord, TokenUsage
 ├── tests/
-│   ├── test_query_builder.py         <- Unit tests for SQL generation from mappings
-│   ├── test_validation/
+│   ├── test_governance.py            <- Unit tests for SQL governance rules
 │   ├── test_tools/
 │   ├── test_agent.py
-│   └── conftest.py                   <- Fixtures with test Postgres (via testcontainers or similar)
-├── examples/
-│   ├── basic_usage.py
-│   └── fastapi_integration.py
+│   └── conftest.py
 ├── pyproject.toml
 ├── LICENSE                           <- MIT
 └── README.md
@@ -563,7 +254,7 @@ finance-query-agent/
 
 ## 14. Integration with my_personal_incomes_ai
 
-The consuming app deploys the finance-query-agent as an AWS Lambda via the Terraform module, providing the SchemaMapping as JSON. MPI's backend invokes the agent Lambda directly via `boto3.client('lambda').invoke()`.
+The consuming app deploys the finance-query-agent as an AWS Lambda via the Terraform module. MPI's backend invokes the agent Lambda directly via `boto3.client('lambda').invoke()`.
 
 **Terraform integration:**
 
@@ -571,8 +262,7 @@ The consuming app deploys the finance-query-agent as an AWS Lambda via the Terra
 module "finance_agent" {
   source = "../finance-query-agent/terraform"
 
-  schema_config_json = file("${path.module}/agent_schema.json")
-  ecr_image_uri      = "${module.finance_agent.ecr_repository_url}:latest"
+  ecr_image_uri = "${module.finance_agent.ecr_repository_url}:latest"
 }
 ```
 
@@ -595,52 +285,20 @@ async def query_agent(user_id: str, session_id: str, question: str) -> dict:
     return json.loads(result["body"])
 ```
 
-## 15. Schema Mapping Versioning
+## 15. Design Decisions & Clarifications
 
-The `SchemaMapping` model is part of the service's configuration API. Changes to it follow semver:
-
-- **Patch:** Bug fixes, no mapping changes.
-- **Minor:** New optional fields on `SchemaMapping`/`TableMapping` (backward compatible). New optional column keys. New tools that activate when optional columns are mapped.
-- **Major:** New required fields, renamed fields, removed fields, changed semantics of existing fields.
-
-## 16. Design Decisions & Clarifications
-
-### 16.1 `JoinDef.on` Format
-
-The `on` field accepts a single equality condition in the form `table.column = table.column`. Compound join conditions (AND) are not supported in v1. If a join requires multiple conditions, use a single equality on the primary key and filter additional conditions in the WHERE clause.
-
-### 16.2 Sign-Based `AmountConvention` Aggregation
-
-When `sign_means_expense="negative"`, expense amounts are stored as negative values (e.g., -50.00). Spending tools use `SUM(ABS(amount))` to produce positive totals. When `sign_means_expense="positive"`, expense amounts are positive, and spending tools use `SUM(amount)` directly. In both cases, filtering for expenses uses the sign: `WHERE amount < 0` (negative convention) or `WHERE amount > 0` (positive convention). Income filtering uses the opposite sign.
-
-### 16.3 UNION ALL with Independent `AmountConvention`
-
-When primary and secondary transaction tables have different `AmountConvention` settings, the query builder applies each table's convention independently within its side of the `UNION ALL`. Each SELECT applies the correct filtering and aggregation for its own convention before the UNION.
-
-### 16.4 Single Connection Model
+### 15.1 Single Connection Model
 
 The service uses a single `asyncpg.connect()` per Lambda invocation instead of a connection pool. This matches Lambda's execution model (one concurrent request per instance). The connection is created at request start and closed in a `finally` block. DB credentials are resolved from Secrets Manager on cold start and cached via `lru_cache`.
 
-### 16.5 Description as Merchant Identity
+### 15.2 Governance Error Recovery
 
-In v1, merchant grouping uses the raw `description` column value. "NETFLIX.COM 03/01" and "Netflix Inc" are treated as separate merchants. Merchant normalization (fuzzy matching, alias resolution) is explicitly out of scope for v1. Consumers can pre-normalize descriptions in their database if needed.
+When `validate_select_only` rejects a query, the error is returned to the LLM as a tool call failure with a description of the rule that was violated. The LLM can retry with a corrected query. This is intentional — the LLM learns within the conversation what constraints it must respect.
 
-### 16.6 Recurring Expense Normalization
+### 15.3 user_id Injection
 
-The `get_recurring_expenses` tool normalizes descriptions with `LOWER(TRIM(description))` only. This is intentional for v1 — it catches exact duplicates with case/whitespace variance but does not attempt fuzzy matching. Same limitation as 17.5.
+The governance layer strips any `WHERE user_id = ...` condition written by the LLM and replaces it with a parameterized `WHERE user_id = $1` using the authenticated `user_id` from the Lambda event. This prevents the LLM from querying another user's data even if prompted to do so.
 
-### 16.7 `on_tool_call` Hook Semantics
+## 16. Open Questions
 
-The `on_tool_call` hook fires once per tool execution. It is synchronous and fire-and-forget — exceptions are logged and swallowed.
-
-### 16.8 UNION ALL Sort Order
-
-When queries combine primary and secondary transactions via `UNION ALL`, results are sorted by the transaction date column descending (`ORDER BY date DESC`) by default. Aggregation tools that GROUP BY override this with their own ordering (e.g., `ORDER BY total_amount DESC`).
-
-### 16.9 `account_id` Type Coercion
-
-The `account_id` parameter on tool inputs is typed as `str`. The service passes it to asyncpg as-is. asyncpg handles coercion to the database column type (UUID, integer, text) automatically via its type codec system. No explicit casting is needed.
-
-## 17. Open Questions
-
-1. **Currency handling:** The service returns per-currency breakdowns. Should the LLM present all currencies, or should the system prompt instruct it to highlight the "primary" currency? If so, how is primary currency determined?
+1. **Currency handling:** The service returns per-currency results from raw queries. Should the LLM present all currencies, or should the system prompt instruct it to highlight the "primary" currency? If so, how is primary currency determined?

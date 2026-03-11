@@ -2,7 +2,7 @@
 
 AI-powered financial query agent. Answers natural language questions about spending, income, and transactions. Deployed as an AWS Lambda invoked by MPI's backend via `boto3 lambda.invoke()`.
 
-Uses a **tools-as-wrappers** architecture: the LLM picks a tool and fills parameters, the service generates and executes parameterized SQL. No raw SQL reaches the LLM. A secondary **visualization agent** generates chart specs from query results when the data is chartable.
+Uses a **text-to-SQL** architecture: the LLM writes SQL against a documented schema; a governance layer validates every query before execution. A secondary **visualization agent** generates chart specs from query results when the data is chartable.
 
 ```mermaid
 graph LR
@@ -10,14 +10,7 @@ graph LR
 
     subgraph QUERY_AGENT["Query Agent (Pydantic AI)"]
         direction TB
-        subgraph PREDEFINED["Predefined Tools"]
-            direction TB
-            T1["query_expenses"]
-            T2["query_income"]
-            T3["query_balance_history"]
-            T4["search_transactions"]
-            T5["get_recurring_expenses"]
-        end
+        T1["execute_sql"]
     end
 
     QUERY_AGENT -->|"TextAnswer"| OUT_TEXT["Text Response"]
@@ -29,16 +22,10 @@ graph LR
 
     VIZ_AGENT --> OUT_VIZ["Text + Chart Specs"]
 
-    T1 --> MV[("Materialized Views<br/>(pre-computed)")]
-    T2 --> MV
-    T3 --> MV
-    T4 --> QB["QueryBuilder<br/>(SchemaMapping → SQL)"]
-    T5 --> QB
-    MV --> PG[("PostgreSQL")]
-    QB --> PG
+    T1 --> GOV["SQL Governance<br/>(validate_select_only)"]
+    GOV --> PG[("PostgreSQL")]
 
     style QUERY_AGENT fill:#2a2a3c,stroke:#88c,color:#fff
-    style PREDEFINED fill:#2d5a3d,stroke:#4a9,color:#fff
     style VIZ_AGENT fill:#3a3a5c,stroke:#88c,color:#fff
 ```
 
@@ -59,10 +46,10 @@ sequenceDiagram
     Lambda->>Dynamo: Load conversation history
     Dynamo-->>Lambda: Encrypted messages (Fernet)
 
-    Lambda->>LLM: System prompt + history + question
-    LLM-->>Lambda: Tool call: query_expenses(...)
+    Lambda->>LLM: System prompt + schema + history + question
+    LLM-->>Lambda: Tool call: execute_sql(sql)
 
-    Lambda->>PG: Parameterized SQL ($1, $2, ...)
+    Lambda->>PG: Governed SQL (SELECT-only, LIMIT enforced)
     PG-->>Lambda: Query results
 
     Lambda->>LLM: Tool results
@@ -96,17 +83,12 @@ graph TB
             AGENT[Query Agent<br/><i>agent.py</i>]
             AGENT --> TOOLS
 
-            subgraph TOOLS["Predefined Tools"]
-                T1[query_expenses]
-                T2[query_income]
-                T3[query_balance_history]
-                T4[search_transactions]
-                T5[get_recurring_expenses]
+            subgraph TOOLS["SQL Tool"]
+                T1[execute_sql]
             end
 
-            QB[QueryBuilder<br/><i>SchemaMapping → SQL</i>]
-            T4 --> QB
-            T5 --> QB
+            GOV[SQL Governance<br/><i>sql_governance.py</i>]
+            T1 --> GOV
 
             AGENT -->|AnswerWithVisualization| VIZ
             VIZ[Visualization Agent<br/><i>visualization.py</i>]
@@ -119,10 +101,7 @@ graph TB
     LLM_API[LLM API<br/><i>OpenAI</i>]
     LOGFIRE[Logfire<br/><i>PII-scrubbed traces</i>]
 
-    QB -->|parameterized queries| RDS
-    T1 -->|parameterized queries| RDS
-    T2 -->|parameterized queries| RDS
-    T3 -->|parameterized queries| RDS
+    GOV -->|governed queries| RDS
     HANDLER <-->|encrypted history| DDB
     AGENT <-->|inference| LLM_API
     VIZ <-->|inference| LLM_API
@@ -136,53 +115,51 @@ graph TB
 
 ## Tool Architecture
 
-All query tools are predefined — the LLM picks a tool and fills parameters, the service generates parameterized SQL. No raw SQL from the LLM.
+The agent has one tool: `execute_sql`. The LLM writes a SELECT query against the schema documented in `schema.yaml`; governance validates it before execution.
 
 ```mermaid
 graph LR
     Q[User Question] --> AGENT[Pydantic AI Agent]
 
-    AGENT --> PREDEFINED
+    AGENT --> T1[execute_sql]
 
-    subgraph PREDEFINED["Predefined Tools — Safe by Construction"]
+    T1 --> GOV
+
+    subgraph GOV["SQL Governance"]
         direction TB
-        V["View-Backed<br/>─────────────<br/>query_expenses<br/>query_income<br/>query_balance_history"]
-        D["Direct Query<br/>─────────────<br/>search_transactions<br/>get_recurring_expenses"]
+        R1["SELECT-only (no DML/DDL)"]
+        R2["LIMIT required"]
+        R3["user_id injected by service"]
+        R4["No CROSS JOIN / comma join"]
+        R5["No set_config()"]
+        R6["asyncpg type normalization"]
     end
 
-    V -->|"$1, $2, ..."| DB[(PostgreSQL)]
-    D --> QB[QueryBuilder]
-    QB -->|"$1, $2, ..."| DB
+    GOV -->|"governed SQL"| DB[(PostgreSQL)]
 
-    style PREDEFINED fill:#2d5a3d,stroke:#4a9,color:#fff
+    style GOV fill:#2d5a3d,stroke:#4a9,color:#fff
 ```
 
 ## Query Generation Pipeline
 
-View-backed tools (`query_expenses`, `query_income`, `query_balance_history`) query pre-computed materialized views directly. Direct query tools (`search_transactions`, `get_recurring_expenses`) use the `QueryBuilder` to generate SQL from `SchemaMapping`.
+The LLM generates SQL against a documented schema. `schema.yaml` in `src/finance_query_agent/` documents tables, columns, business rules, and example queries; this is injected into the system prompt on every request. The governance layer (`validate_select_only`) validates the LLM-generated SQL before execution — enforcing SELECT-only, requiring a LIMIT, blocking dangerous patterns (CROSS JOIN, `set_config()`), and injecting `user_id` scoping.
 
 ```mermaid
 graph LR
-    SM["SchemaMapping<br/>(JSON config)"] --> QB[QueryBuilder]
-    TP["Tool Parameters<br/><i>from LLM</i>"] --> QB
-    UID["user_id<br/><i>injected by service</i>"] --> QB
+    SY["schema.yaml<br/>(tables, columns,<br/>business rules)"] --> SP[System Prompt]
+    SP --> LLM[LLM]
+    LLM --> SQL["LLM-generated SQL"]
 
-    QB --> GQ["GeneratedQuery"]
+    SQL --> GOV["SQL Governance<br/>(validate_select_only)"]
+    UID["user_id<br/><i>injected by service</i>"] --> GOV
 
-    subgraph GQ["GeneratedQuery"]
-        SQL["Parameterized SQL<br/><code>SELECT ... WHERE user_id = $1<br/>AND date >= $2 AND date <= $3</code>"]
-        PARAMS["Params: ['user-123', '2026-02-01', '2026-02-28']"]
-    end
-
-    GQ -->|connection pool| PG[(PostgreSQL)]
+    GOV --> PG[(PostgreSQL)]
     PG --> ROWS[Result Rows]
-    ROWS --> LLM[LLM formats answer]
+    ROWS --> LLM2[LLM formats answer]
 
-    style SM fill:#3a3a5c,stroke:#88c,color:#fff
-    style GQ fill:#1a3a5c,stroke:#4a9,color:#fff
+    style SY fill:#3a3a5c,stroke:#88c,color:#fff
+    style GOV fill:#2d5a3d,stroke:#4a9,color:#fff
 ```
-
-For multi-source schemas (bank accounts + credit cards), the builder generates `UNION ALL` with independent JOINs per table and re-aggregates across both sources.
 
 ## Conversation Memory
 
@@ -228,7 +205,7 @@ graph TB
 
     subgraph READONLY["Read-Only Enforcement"]
         ROLE["DB role: read-only<br/><i>security boundary</i>"]
-        KW["Keyword rejection<br/><i>defense in depth</i>"]
+        GOV["SQL governance (AST-level)<br/><i>defense in depth</i>"]
     end
 
     subgraph PII["PII Protection"]
@@ -238,7 +215,8 @@ graph TB
 
     subgraph SQLS["SQL Safety"]
         PARAM["Parameterized queries<br/><i>$1, $2 — no interpolation</i>"]
-        ALLOW["Table/column allowlist<br/><i>derived from SchemaMapping</i>"]
+        SELONLY["SELECT-only enforcement<br/><i>no DML/DDL</i>"]
+        LIMIT["LIMIT required on all queries"]
         TIMEOUT["30s query timeout"]
     end
 
@@ -254,93 +232,9 @@ graph TB
     style SQLS fill:#3a3a5c,stroke:#88c,color:#fff
 ```
 
-## Schema Mapping (Client Integration)
+## Schema Configuration
 
-The only thing a client provides. A declarative config that maps their DB schema to the agent's tools.
-
-```mermaid
-graph LR
-    subgraph SchemaMapping["SchemaMapping (JSON)"]
-        direction TB
-        TX["transactions<br/>─────────────────<br/>table: account_movements<br/>columns: date, amount, ...<br/>joins: accounts, tags<br/>amount_convention: debit/credit"]
-        CAT["categories<br/>─────────────────<br/>table: tags<br/>columns: id, name<br/>user_scoped: false"]
-        ACCT["accounts<br/>─────────────────<br/>table: accounts<br/>columns: id, name, user_id"]
-        SEC["secondary_transactions<br/><i>(optional)</i><br/>─────────────────<br/>table: credit_card_movements<br/>independent joins + convention"]
-        VIEWS["unified views<br/><i>(optional)</i><br/>─────────────────<br/>unified_expenses<br/>unified_income<br/>unified_balances<br/><i>pre-computed materialized views</i>"]
-    end
-
-    SchemaMapping --> DERIVES
-
-    subgraph DERIVES["Service Derives"]
-        direction TB
-        D1["All predefined tool queries"]
-        D3["User isolation WHERE clauses"]
-        D4["UNION ALL for multi-source"]
-        D5["Schema validation on startup"]
-    end
-
-    style SchemaMapping fill:#3a3a5c,stroke:#88c,color:#fff
-    style DERIVES fill:#2d5a3d,stroke:#4a9,color:#fff
-```
-
-### Schema Config Structure
-
-The schema config is a JSON object provided via `SCHEMA_CONFIG_JSON` (inline), `SCHEMA_CONFIG_PATH` (file), or `SCHEMA_CONFIG_SSM_PARAM` (AWS SSM). In production, MPI's CI/CD manages the SSM parameter.
-
-**Required sections:** `transactions`, `categories`, `accounts`
-
-**Optional sections:** `secondary_transactions` (e.g. credit cards), `unified_expenses`, `unified_income`, `unified_balances`
-
-The unified view mappings are critical — without them, the view-backed tools (`query_expenses`, `query_income`, `query_balance_history`) are **hidden from the LLM** via prepare callbacks. Only `search_transactions` and `get_recurring_expenses` remain available.
-
-Each view mapping requires specific logical keys:
-
-| View | Required keys |
-|------|---------------|
-| `unified_expenses` | `user_id`, `date`, `usd_amount`, `local_amount`, `category`, `merchant` |
-| `unified_income` | `user_id`, `month`, `usd_amount`, `local_amount` |
-| `unified_balances` | `user_id`, `date`, `usd_total`, `local_total` |
-
-Optional key for `unified_balances`: `currency_breakdown` (JSONB per-currency breakdown).
-
-Example view mapping (maps `historical_expenses_mv` materialized view):
-
-```json
-{
-  "unified_expenses": {
-    "table": "historical_expenses_mv",
-    "columns": {
-      "user_id": "user_id",
-      "date": "issued_at",
-      "usd_amount": "usd_amount",
-      "local_amount": "local_amount",
-      "category": "category",
-      "merchant": "description"
-    }
-  }
-}
-```
-
-See `docs/finance-query-agent-spec.md` Section 6 for the full specification, and `localstack/schema-config.json` for a complete working example.
-
-### Schema Config in Production
-
-The schema config JSON is stored in **AWS SSM Parameter Store** at `/finance-query-agent/schema-config`. It is seeded by Terraform on first apply (`terraform/main.tf`) with `lifecycle { ignore_changes = [value] }` — meaning Terraform never overwrites it after that. All subsequent updates go directly via the AWS CLI or MPI's CI/CD.
-
-The Lambda reads `SCHEMA_CONFIG_SSM_PARAM` on cold start and caches it for the lifetime of the container.
-
-To update the schema config in production:
-
-```bash
-aws ssm put-parameter \
-  --name "/finance-query-agent/schema-config" \
-  --value "$(cat localstack/schema-config.json)" \
-  --overwrite \
-  --profile my_personal_incomes \
-  --region us-east-1
-```
-
-The change takes effect on the next Lambda cold start.
+`schema.yaml` in `src/finance_query_agent/` documents the database schema for the LLM: tables, columns, business rules (e.g., how expenses vs income are distinguished), and example queries. It is injected into the system prompt on every invocation. No client-side configuration is required.
 
 ## Invocation
 
@@ -384,7 +278,8 @@ src/finance_query_agent/
 ├── agent.py                Query agent + system prompt
 ├── visualization.py        Visualization agent (chart spec generation)
 ├── config.py               Settings from env vars
-├── query_builder.py        SchemaMapping → parameterized SQL
+├── sql_governance.py       SQL validation (SELECT-only, LIMIT, user_id injection)
+├── schema.yaml             DB schema documentation injected into system prompt
 ├── connection.py           asyncpg single connection (Lambda-aware)
 ├── memory.py               DynamoDB conversation history
 ├── encryption.py           Fernet field encryption
@@ -393,16 +288,9 @@ src/finance_query_agent/
 ├── observability.py        Logfire + scrubbing callback
 ├── exceptions.py           Exception hierarchy
 ├── tools/
-│   ├── unified.py          query_expenses, query_income, query_balance_history (view-backed)
-│   ├── transactions.py     search_transactions
-│   └── recurring.py        get_recurring_expenses
-├── validation/
-│   └── schema_validator.py Validates mapping against live DB
+│   └── sql.py              execute_sql tool + asyncpg type normalization
 └── schemas/
-    ├── mapping.py          SchemaMapping, TableMapping, ViewMapping, JoinDef, ColumnRef
     ├── charts.py           Chart specs (pie, bar, line, grouped_bar)
-    ├── unified_results.py  ExpenseGroup, IncomeMonth, BalanceSnapshot
-    ├── tool_results.py     Transaction, TransactionSearchResult, RecurringExpense
     └── responses.py        AgentResponse, AgentOutput, ChartSpec
 ```
 
