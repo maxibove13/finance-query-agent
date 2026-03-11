@@ -19,7 +19,6 @@ class TestBuildSystemPrompt:
 
     def test_includes_tool_selection_guidance(self) -> None:
         prompt = build_system_prompt()
-        assert "run_constrained_query" in prompt
         assert "query_expenses" in prompt
         assert "query_income" in prompt
         assert "query_balance_history" in prompt
@@ -36,7 +35,7 @@ class TestBuildSystemPrompt:
         prompt = build_system_prompt()
         assert '"local"' in prompt
         assert '"usd"' in prompt
-        assert "Never convert amounts yourself" in prompt
+        assert "Never compute exchange rates or convert amounts yourself" in prompt
 
     def test_includes_language_mirroring(self) -> None:
         prompt = build_system_prompt()
@@ -69,7 +68,6 @@ class TestGetAgent:
         assert tool_names == {
             "search_transactions",
             "get_recurring_expenses",
-            "run_constrained_query",
             "query_expenses",
             "query_income",
             "query_balance_history",

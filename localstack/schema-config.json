@@ -48,5 +48,35 @@
       "expense_value": "DEBIT",
       "income_value": "CREDIT"
     }
+  },
+  "unified_expenses": {
+    "table": "historical_expenses_mv",
+    "columns": {
+      "user_id": "user_id",
+      "date": "issued_at",
+      "usd_amount": "usd_amount",
+      "local_amount": "local_amount",
+      "category": "category",
+      "merchant": "description"
+    }
+  },
+  "unified_income": {
+    "table": "historical_incomes_mv",
+    "columns": {
+      "user_id": "user_id",
+      "month": "issued_at",
+      "usd_amount": "usd_amount",
+      "local_amount": "local_amount"
+    }
+  },
+  "unified_balances": {
+    "table": "historical_balances_mv",
+    "columns": {
+      "user_id": "user_id",
+      "date": "issued_at",
+      "usd_total": "usd_total_balance",
+      "local_total": "local_total_balance",
+      "currency_breakdown": "total_currency_balances"
+    }
   }
 }

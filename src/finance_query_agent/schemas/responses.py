@@ -40,8 +40,6 @@ class AgentResponse(BaseModel):
     answer: str
     tool_calls: list[ToolCallRecord]
     visualizations: list[ChartSpec] | None = None
-    fallback_used: bool
-    fallback_sql: str | None
     unresolved: bool
     original_question: str
     token_usage: TokenUsage

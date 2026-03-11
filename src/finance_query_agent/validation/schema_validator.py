@@ -227,7 +227,6 @@ async def validate_schema(schema: SchemaMapping, conn: Connection) -> ColumnType
 async def introspect_schema(conn: Connection, tables: list[str]) -> str:
     """Return a DDL-like schema description for the given tables.
 
-    Used as LLM context for the fallback SQL tool.
     Covers regular tables, views, AND materialized views.
     """
     rows = await conn.fetch(

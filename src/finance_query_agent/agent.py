@@ -23,7 +23,6 @@ def get_agent(model: str | Model) -> Agent[AgentDeps, AgentOutput]:
     # Import tools here to avoid circular imports at module level
     from pydantic_ai import Tool
 
-    from finance_query_agent.tools.fallback_sql import run_constrained_query
     from finance_query_agent.tools.recurring import get_recurring_expenses
     from finance_query_agent.tools.transactions import search_transactions
     from finance_query_agent.tools.unified import (
@@ -56,7 +55,6 @@ def get_agent(model: str | Model) -> Agent[AgentDeps, AgentOutput]:
         tools=[
             search_transactions,
             get_recurring_expenses,
-            run_constrained_query,
             Tool(query_expenses, prepare=_prepare_query_expenses),  # type: ignore[arg-type]
             Tool(query_income, prepare=_prepare_query_income),  # type: ignore[arg-type]
             Tool(query_balance_history, prepare=_prepare_query_balance_history),  # type: ignore[arg-type]
@@ -89,14 +87,14 @@ Respond in the same language the user writes in.
 - **Finding specific transactions**: search_transactions.
   If has_more is true, tell the user and offer to show the next page.
 - **Recurring payments / subscriptions**: get_recurring_expenses.
-- **Anything else**: run_constrained_query — last resort only.
 
 ## Currency
 
 - query_expenses, query_income, and query_balance_history accept a currency parameter ("usd" or "local").
+  The database stores pre-converted amounts in both currencies, so switching the parameter IS the conversion.
   Default to "local" unless the user asks in USD or a cross-currency comparison.
-- If the user asks to see the same data in a different currency,
-  re-call the tool with the other currency value. Never convert amounts yourself.
+- When the user asks to convert or see amounts in a different currency, call the tool with the desired
+  currency value. Never compute exchange rates or convert amounts yourself.
 - search_transactions and get_recurring_expenses return each row's original currency.
   These cannot be converted — present them as-is with their currency codes.
 

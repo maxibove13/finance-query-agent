@@ -15,14 +15,13 @@ The service is designed as the first consumer's needs dictate (our app's schema,
 
 ## 2. Problem Statement
 
-Users of financial applications need to ask natural language questions about their data ("How much did I spend on groceries last month?", "Compare my spending this month vs last month"). Building this as raw text-to-SQL is unreliable — wrong JOINs, hallucinated column names, and plausible-but-incorrect results erode trust. A tools-based agent with predefined, parameterized query operations provides reliability for the common case, while a constrained SQL fallback covers the long tail.
+Users of financial applications need to ask natural language questions about their data ("How much did I spend on groceries last month?", "Compare my spending this month vs last month"). Building this as raw text-to-SQL is unreliable — wrong JOINs, hallucinated column names, and plausible-but-incorrect results erode trust. A tools-based agent with predefined, parameterized query operations provides reliable, auditable results.
 
 ## 3. Goals
 
 - Provide a **deployed financial query service** (`finance-query-agent`) that any application with a financial database can integrate via HTTP.
 - Use **Pydantic AI** as the agent framework.
 - Implement a **tools-as-wrappers** architecture: the LLM selects which tool to call and with what parameters; the tool executes a predefined, parameterized query.
-- Include a **constrained SQL generation tool** as a fallback for queries not covered by predefined tools.
 - **Configuration-driven integration**: clients provide a declarative schema mapping (table names, column names, joins). The service generates all queries internally. No adapter code to write.
 
 ## 4. Non-Goals
@@ -30,7 +29,7 @@ Users of financial applications need to ask natural language questions about the
 - Not a BI/analytics platform. No dashboards, no visualizations, no semantic layer.
 - No write operations. The agent is strictly read-only.
 - No multi-database support in v1. PostgreSQL only. The schema mapping approach allows future database backends.
-- No custom tool overrides or extension points. The service provides a fixed set of tools. If a question can't be answered by those tools, the constrained SQL fallback handles it.
+- No custom tool overrides or extension points. The service provides a fixed set of predefined tools.
 
 ## 5. Architecture
 
@@ -41,8 +40,7 @@ MPI Lambda ──> boto3 invoke ──> Agent Lambda
                                  │   ├── query_income            (view-backed)
                                  │   ├── query_balance_history   (view-backed)
                                  │   ├── search_transactions
-                                 │   ├── get_recurring_expenses
-                                 │   └── [fallback] run_constrained_query
+                                 │   └── get_recurring_expenses
                                  ├── Materialized Views (pre-computed, with currency conversion)
                                  ├── Query Builder (SchemaMapping → parameterized SQL)
                                  ├── asyncpg → RDS (read-only, single connection)
@@ -50,7 +48,7 @@ MPI Lambda ──> boto3 invoke ──> Agent Lambda
                                  └── Logfire (PII-scrubbed traces)
 ```
 
-**The service owns:** agent definition, tool definitions, query building, prompt engineering, response formatting, SQL validation, database connection management, conversation memory, observability, PII protection.
+**The service owns:** agent definition, tool definitions, query building, prompt engineering, response formatting, database connection management, conversation memory, observability, PII protection.
 
 **The consuming app owns:** schema mapping configuration (via Terraform), authentication, user identity, and Lambda invocation (via boto3).
 
@@ -246,8 +244,6 @@ Tables that are shared/global (no `user_id` column) MUST set `user_scoped=False`
 | View-backed tool queries | `ViewMapping` (unified_expenses, unified_income, unified_balances) |
 | Direct query tool SQL | Column mappings + join definitions + amount convention |
 | Expense/income filtering | `AmountConvention` on each transaction table |
-| Fallback SQL table/column allowlist | All mapped tables and columns (nothing else is queryable) |
-| Schema description for LLM context | Column names, types (introspected from DB), relationships |
 | User isolation `WHERE` clauses | The `user_id` column mapping (direct or via `ColumnRef` + JOIN) |
 | `UNION ALL` for multi-source queries | `transactions` + `secondary_transactions` with independent JOINs |
 
@@ -265,7 +261,7 @@ On startup (first request), the service MUST:
 
 ## 7. Predefined Tools
 
-The agent has 6 tools: 3 view-backed aggregation tools, 2 direct query tools, and 1 constrained SQL fallback. The agent selects the tool and fills the parameters; the service generates and executes the SQL.
+The agent has 5 predefined tools: 3 view-backed aggregation tools and 2 direct query tools. The agent selects the tool and fills the parameters; the service generates and executes parameterized SQL.
 
 View-backed tools (`query_expenses`, `query_income`, `query_balance_history`) query pre-computed materialized views configured via `ViewMapping`. They are conditionally registered — if the corresponding `ViewMapping` is not set in the `SchemaMapping`, the tool is hidden from the agent via a prepare callback that returns `None`.
 
@@ -362,39 +358,9 @@ Identifies recurring transactions (subscriptions, regular payments). Only counts
 
 Returns: `list[RecurringExpense]` — each with `merchant_name`, `estimated_amount` (median), `frequency`, `occurrences`, `total_amount`, `currency`.
 
-## 8. Constrained SQL Generation Tool (Fallback)
+## 8. Agent Configuration
 
-### 8.1 Purpose
-
-Handles queries that don't map to any predefined tool. The agent generates SQL, but under strict constraints that make it safe for production use.
-
-### 8.2 Requirements
-
-**R1 — Read-only enforcement.** Two layers:
-  - Layer 1 (defense-in-depth): Regex-based pre-filter rejects SQL containing DML, DDL, or dangerous keywords: `INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER`, `TRUNCATE`, `CREATE`, `GRANT`, `REVOKE`, `COPY`, `DO`, `EXECUTE`, `CALL`, `SET`, `RESET`, `LISTEN`, `NOTIFY`, `LOAD`, `VACUUM`, `REINDEX`. This is not a security boundary — it catches obvious mistakes and reduces attack surface.
-  - Layer 2 (security boundary): The database connection MUST use a read-only PostgreSQL role. This is the actual enforcement.
-
-**R2 — Table and column whitelisting.** The allowlist is derived automatically from the `SchemaMapping` — only mapped tables and columns are queryable. The tool MUST reject queries referencing anything outside the mapping.
-
-**R3 — EXPLAIN validation.** Before executing any generated query, run `EXPLAIN` on it. If `EXPLAIN` fails (syntax error, invalid reference), return the error to the LLM for self-correction via Pydantic AI's `ModelRetry`. Maximum 3 retry attempts.
-
-**R4 — Query timeout.** All queries executed by this tool MUST have a hard timeout of 30 seconds (configurable). Use `statement_timeout` at the session level.
-
-**R5 — Result set limit.** The tool MUST inject `LIMIT 200` (configurable) if the generated SQL does not already contain a `LIMIT` clause.
-
-**R6 — Schema context injection.** The tool's prompt includes the whitelisted table schemas (column names, types, descriptions, foreign key relationships) derived from the `SchemaMapping` and introspected from the database.
-
-**R7 — No subqueries in v1.** LLM-generated SQL must be a single `SELECT` statement. CTEs, subqueries, `DO` blocks, and multiple statements are rejected. This constraint can be relaxed in future versions after validation. (Note: this restriction applies only to the fallback tool, not to the service's predefined tools which use CTEs/subqueries internally.)
-
-**R8 — User isolation injection.** The tool MUST automatically inject user scoping using the `user_id` mapping (resolving `ColumnRef` + JOINs as needed). The LLM-generated SQL MUST NOT contain any `user_id` condition — the service strips any LLM-generated user filtering and replaces it with its own.
-
-**R9 — Audit logging.** Every query generated by this tool MUST be logged with: the original natural language question, the generated SQL, whether it passed validation, whether it was executed, the execution time, and the row count returned.
-
-**R10 — Unresolved query tracking.** If the fallback tool also fails (after retries), the original question MUST be logged as an "unresolved query" for later analysis. This is the feedback loop for identifying new predefined tools to build.
-
-## 9. Agent Configuration
-
-### 9.1 Service Entry Point
+### 8.1 Service Entry Point
 
 The service is deployed as an AWS Lambda invoked by the consuming app's backend via `boto3.client('lambda').invoke()`. The entry point is `handler.handler`. The caller wraps the payload as `{"body": json.dumps({...})}` to match the handler's event parsing. The Lambda timeout is 30 seconds to match the API Gateway limit.
 
@@ -420,13 +386,13 @@ Configuration is via environment variables (set by Terraform):
 | `LLM_API_KEY_SECRET_ARN` | Secrets Manager ARN for LLM API key |
 | `LOGFIRE_TOKEN_SECRET_ARN` | Secrets Manager ARN for Logfire token (optional) |
 
-### 9.1.1 Connection Lifecycle
+### 8.1.1 Connection Lifecycle
 
 The Lambda uses a single `asyncpg.connect()` per invocation (no pool). This matches Lambda's single-concurrent-request model. The connection is opened at the start of `_process_request` and closed in a `finally` block.
 
 **Database URL format:** Raw `asyncpg` format: `postgresql://user:pass@host:port/dbname`. Resolved from Secrets Manager at runtime (JSON secret with `username`, `password`, `host`, `port`, `dbname`).
 
-### 9.1.2 `run()` Method
+### 8.1.2 `run()` Method
 
 ```python
 async def run(
@@ -446,7 +412,7 @@ async def run(
     """
 ```
 
-### 9.1.3 Exception Hierarchy
+### 8.1.3 Exception Hierarchy
 
 ```python
 class FinanceQueryError(Exception):
@@ -467,7 +433,7 @@ class LLMError(FinanceQueryError):
 
 All exceptions inherit from `FinanceQueryError` so consumers can catch broadly or narrowly. Raw `asyncpg` and `httpx` exceptions are never surfaced directly.
 
-### 9.2 Hooks
+### 8.2 Hooks
 
 **`pre_llm_hook`** — Called before tool results are sent back to the LLM. Use for PII redaction.
 
@@ -494,26 +460,23 @@ class ToolCallEvent:
 # Fire-and-forget. Must be synchronous. Exceptions are logged and swallowed.
 ```
 
-### 9.3 System Prompt Requirements
+### 8.3 System Prompt Requirements
 
 The default system prompt MUST:
 - Identify the agent as a financial data assistant.
 - **Inject the current date** (e.g., "Today is 2026-03-03") so the LLM can resolve relative dates ("last month" -> February 2026).
 - Instruct the LLM to resolve relative dates to absolute `date` values before calling tools.
-- Instruct the LLM to prefer predefined tools over the SQL fallback.
 - Instruct the LLM to ask clarifying questions (via a structured response) when the user's query is ambiguous, rather than guessing.
 - Instruct the LLM to format monetary values with currency symbols and two decimal places.
 - Instruct the LLM to never fabricate data — if a tool returns empty results, say so.
 - Be fully replaceable via `system_prompt_override`.
 
-## 10. Response Format
+## 9. Response Format
 
 ```python
 class AgentResponse(BaseModel):
     answer: str                          # Natural language answer
     tool_calls: list[ToolCallRecord]     # Which tools were used, with params
-    fallback_used: bool                  # Whether SQL fallback was invoked
-    fallback_sql: str | None             # The generated SQL if fallback was used
     unresolved: bool                     # True if the agent couldn't answer
     original_question: str
     token_usage: TokenUsage              # LLM token consumption
@@ -531,7 +494,7 @@ class TokenUsage(BaseModel):
 
 The consuming application decides how to present this to the user (chat UI, API response, etc.).
 
-## 11. Multi-Currency Behavior
+## 10. Multi-Currency Behavior
 
 Financial data often spans multiple currencies. The service handles this consistently across all tools:
 
@@ -541,26 +504,26 @@ Financial data often spans multiple currencies. The service handles this consist
 - **Recurring tool** (`get_recurring_expenses`): Groups by (description, currency) — a Netflix charge in USD and one in EUR are separate recurring items.
 - **LLM formatting**: The system prompt instructs the LLM to present multi-currency results clearly (e.g., "You spent $1,200 USD and $45,000 UYU on groceries last month").
 
-## 12. Security Requirements
+## 11. Security Requirements
 
 | Requirement | Description |
 |-------------|-------------|
 | **S1 — User isolation** | Every query is scoped to a `user_id`. The service injects user filtering using the mapped `user_id` column (direct or via `ColumnRef` + JOIN). Tables marked `user_scoped=False` (e.g., shared category tables) are not filtered. The LLM never controls user scoping. |
 | **S2 — No credential exposure** | The `database_url` is resolved from Secrets Manager at runtime. The service never logs or transmits connection strings. |
-| **S3 — Read-only** | No tool, including the fallback, can modify data. Enforced at connection level (read-only DB role, the security boundary) and service level (keyword rejection, defense-in-depth). |
-| **S4 — Input sanitization** | Tool parameters are validated via Pydantic models. All queries use parameterized values (`$1`, `$2`, etc.). The fallback tool validates generated SQL structure before execution. |
+| **S3 — Read-only** | No tool can modify data. Enforced at connection level (read-only DB role, the security boundary). |
+| **S4 — Input sanitization** | Tool parameters are validated via Pydantic models. All queries use parameterized values (`$1`, `$2`, etc.). |
 | **S5 — PII in LLM context** | Transaction descriptions sent to the LLM may contain PII (merchant names, amounts). The consuming application is responsible for PII handling policy via the `pre_llm_hook`. |
 
-## 13. Observability Requirements
+## 12. Observability Requirements
 
 | Requirement | Description |
 |-------------|-------------|
 | **O1 — Structured logging** | All tool invocations logged with: tool name, parameters, execution time, result row count, success/failure. Uses Python `logging` — no proprietary logging. |
-| **O2 — Unresolved query log** | Failed queries logged separately for coverage analysis (see R10). |
+| **O2 — Unresolved query log** | Queries the agent couldn't answer are logged for coverage analysis. |
 | **O3 — Tracing hooks** | `on_tool_call` callback fires after each tool execution with a `ToolCallEvent`. Synchronous, fire-and-forget, exceptions swallowed. The consuming application bridges this to Langfuse/OpenTelemetry/etc. |
 | **O4 — Cost tracking** | `AgentResponse.token_usage` contains input/output token counts from the LLM call. |
 
-## 14. Repository Structure
+## 13. Repository Structure
 
 ```
 finance-query-agent/
@@ -574,11 +537,9 @@ finance-query-agent/
 │       │   ├── __init__.py
 │       │   ├── unified.py            <- query_expenses, query_income, query_balance_history (view-backed)
 │       │   ├── transactions.py       <- search_transactions
-│       │   ├── recurring.py          <- get_recurring_expenses (query + Python post-processing)
-│       │   └── fallback_sql.py       <- Constrained SQL generation tool
+│       │   └── recurring.py          <- get_recurring_expenses (query + Python post-processing)
 │       ├── validation/
 │       │   ├── __init__.py
-│       │   ├── sql_validator.py      <- Keyword rejection, table/column allowlist, LIMIT injection
 │       │   └── schema_validator.py   <- Validates SchemaMapping against live DB on startup
 │       └── schemas/
 │           ├── __init__.py
@@ -600,7 +561,7 @@ finance-query-agent/
 └── README.md
 ```
 
-## 15. Integration with my_personal_incomes_ai
+## 14. Integration with my_personal_incomes_ai
 
 The consuming app deploys the finance-query-agent as an AWS Lambda via the Terraform module, providing the SchemaMapping as JSON. MPI's backend invokes the agent Lambda directly via `boto3.client('lambda').invoke()`.
 
@@ -634,7 +595,7 @@ async def query_agent(user_id: str, session_id: str, question: str) -> dict:
     return json.loads(result["body"])
 ```
 
-## 16. Schema Mapping Versioning
+## 15. Schema Mapping Versioning
 
 The `SchemaMapping` model is part of the service's configuration API. Changes to it follow semver:
 
@@ -642,44 +603,44 @@ The `SchemaMapping` model is part of the service's configuration API. Changes to
 - **Minor:** New optional fields on `SchemaMapping`/`TableMapping` (backward compatible). New optional column keys. New tools that activate when optional columns are mapped.
 - **Major:** New required fields, renamed fields, removed fields, changed semantics of existing fields.
 
-## 17. Design Decisions & Clarifications
+## 16. Design Decisions & Clarifications
 
-### 17.1 `JoinDef.on` Format
+### 16.1 `JoinDef.on` Format
 
 The `on` field accepts a single equality condition in the form `table.column = table.column`. Compound join conditions (AND) are not supported in v1. If a join requires multiple conditions, use a single equality on the primary key and filter additional conditions in the WHERE clause.
 
-### 17.2 Sign-Based `AmountConvention` Aggregation
+### 16.2 Sign-Based `AmountConvention` Aggregation
 
 When `sign_means_expense="negative"`, expense amounts are stored as negative values (e.g., -50.00). Spending tools use `SUM(ABS(amount))` to produce positive totals. When `sign_means_expense="positive"`, expense amounts are positive, and spending tools use `SUM(amount)` directly. In both cases, filtering for expenses uses the sign: `WHERE amount < 0` (negative convention) or `WHERE amount > 0` (positive convention). Income filtering uses the opposite sign.
 
-### 17.3 UNION ALL with Independent `AmountConvention`
+### 16.3 UNION ALL with Independent `AmountConvention`
 
 When primary and secondary transaction tables have different `AmountConvention` settings, the query builder applies each table's convention independently within its side of the `UNION ALL`. Each SELECT applies the correct filtering and aggregation for its own convention before the UNION.
 
-### 17.4 Single Connection Model
+### 16.4 Single Connection Model
 
 The service uses a single `asyncpg.connect()` per Lambda invocation instead of a connection pool. This matches Lambda's execution model (one concurrent request per instance). The connection is created at request start and closed in a `finally` block. DB credentials are resolved from Secrets Manager on cold start and cached via `lru_cache`.
 
-### 17.5 Description as Merchant Identity
+### 16.5 Description as Merchant Identity
 
 In v1, merchant grouping uses the raw `description` column value. "NETFLIX.COM 03/01" and "Netflix Inc" are treated as separate merchants. Merchant normalization (fuzzy matching, alias resolution) is explicitly out of scope for v1. Consumers can pre-normalize descriptions in their database if needed.
 
-### 17.6 Recurring Expense Normalization
+### 16.6 Recurring Expense Normalization
 
 The `get_recurring_expenses` tool normalizes descriptions with `LOWER(TRIM(description))` only. This is intentional for v1 — it catches exact duplicates with case/whitespace variance but does not attempt fuzzy matching. Same limitation as 17.5.
 
-### 17.7 `on_tool_call` Hook Semantics
+### 16.7 `on_tool_call` Hook Semantics
 
-The `on_tool_call` hook fires once per final tool execution. When the fallback SQL tool retries (via `ModelRetry`), the hook fires only on the final attempt (whether successful or the last failed attempt). Intermediate retry attempts do not trigger the hook.
+The `on_tool_call` hook fires once per tool execution. It is synchronous and fire-and-forget — exceptions are logged and swallowed.
 
-### 17.8 UNION ALL Sort Order
+### 16.8 UNION ALL Sort Order
 
 When queries combine primary and secondary transactions via `UNION ALL`, results are sorted by the transaction date column descending (`ORDER BY date DESC`) by default. Aggregation tools that GROUP BY override this with their own ordering (e.g., `ORDER BY total_amount DESC`).
 
-### 17.9 `account_id` Type Coercion
+### 16.9 `account_id` Type Coercion
 
 The `account_id` parameter on tool inputs is typed as `str`. The service passes it to asyncpg as-is. asyncpg handles coercion to the database column type (UUID, integer, text) automatically via its type codec system. No explicit casting is needed.
 
-## 18. Open Questions
+## 17. Open Questions
 
 1. **Currency handling:** The service returns per-currency breakdowns. Should the LLM present all currencies, or should the system prompt instruct it to highlight the "primary" currency? If so, how is primary currency determined?

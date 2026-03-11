@@ -138,7 +138,7 @@ class TestProcessRequest:
         assert resp.original_question == "test?"
         assert resp.token_usage.input_tokens == 100
         assert resp.token_usage.output_tokens == 50
-        assert resp.unresolved is True  # no tool_calls, no fallback
+        assert resp.unresolved is True  # no tool_calls
 
     @pytest.mark.asyncio()
     async def test_closes_connection_on_success(self, mocks: dict) -> None:
