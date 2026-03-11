@@ -114,7 +114,8 @@ resource "aws_lambda_function" "agent" {
     variables = {
       DYNAMODB_TABLE            = aws_dynamodb_table.conversations.name
       DYNAMODB_REGION           = data.aws_region.current.name
-      QUERY_MODEL               = var.query_model
+      PRIMARY_MODEL             = var.primary_model
+      SECONDARY_MODEL           = var.secondary_model
       SCHEMA_CONFIG_SSM_PARAM   = aws_ssm_parameter.schema_config.name
       DB_CREDENTIALS_SECRET_ARN = aws_secretsmanager_secret.db_credentials.arn
       ENCRYPTION_KEY_SECRET_ARN = aws_secretsmanager_secret.encryption_key.arn

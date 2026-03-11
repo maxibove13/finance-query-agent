@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class PieSlice(BaseModel):
     label: str
     value: float
-    percentage: float  # 0-100
+    percentage: float = 0.0  # computed by PieChartSpec validator; not from LLM
 
 
 class PieChartSpec(BaseModel):
@@ -18,6 +18,14 @@ class PieChartSpec(BaseModel):
     title: str
     currency: str
     slices: list[PieSlice]
+
+    @model_validator(mode="after")
+    def compute_percentages(self) -> PieChartSpec:
+        total = sum(s.value for s in self.slices)
+        if total > 0:
+            for s in self.slices:
+                s.percentage = round(s.value / total * 100, 2)
+        return self
 
 
 class BarItem(BaseModel):

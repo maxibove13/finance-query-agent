@@ -130,7 +130,7 @@ async def _process_request(body: dict[str, Any]) -> AgentResponse:
 
         qb = QueryBuilder(schema)
         deps = AgentDeps(connection=conn, query_builder=qb, schema=schema, user_id=user_id)
-        agent = get_agent(settings.query_model)
+        agent = get_agent(settings.primary_model)
 
         usage_limits = UsageLimits(request_limit=settings.agent_request_limit)
         model_settings = ModelSettings(timeout=settings.agent_per_request_timeout)
@@ -179,7 +179,7 @@ async def _process_request(body: dict[str, Any]) -> AgentResponse:
                         generate_visualizations(
                             question=question,
                             tool_results=deps.tool_results,
-                            model=settings.viz_model,
+                            model=settings.secondary_model,
                         ),
                         timeout=viz_budget,
                     )

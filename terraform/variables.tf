@@ -4,9 +4,14 @@ variable "project_name" {
 }
 
 # LLM
-variable "query_model" {
+variable "primary_model" {
   type    = string
-  default = "openai:gpt-4o"
+  default = "openai:gpt-4.1"
+}
+
+variable "secondary_model" {
+  type    = string
+  default = "openai:gpt-4.1-mini"
 }
 
 # Schema

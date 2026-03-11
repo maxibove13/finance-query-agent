@@ -83,12 +83,12 @@ def _build_mocks() -> dict:
     settings.encryption_key = None
     settings.dynamodb_table = "t"
     settings.dynamodb_region = "us-east-1"
-    settings.query_model = "test:m"
+    settings.primary_model = "test:m"
     settings.agent_request_limit = 7
     settings.agent_per_request_timeout = 12.0
     settings.agent_run_timeout = 25.0
     settings.request_budget = 28.0
-    settings.viz_model = "test:viz"
+    settings.secondary_model = "test:viz"
     settings.max_question_length = 2000
     settings.max_session_id_length = 128
 

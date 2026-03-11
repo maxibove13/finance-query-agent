@@ -161,14 +161,31 @@ class TestChartSpecModels:
             title="Spending by Category (USD)",
             currency="USD",
             slices=[
-                {"label": "Food", "value": 150.0, "percentage": 60.0},
-                {"label": "Transport", "value": 100.0, "percentage": 40.0},
+                {"label": "Food", "value": 150.0},
+                {"label": "Transport", "value": 100.0},
             ],
         )
         assert chart.chart_type == "pie"
         assert len(chart.slices) == 2
         dumped = chart.model_dump()
         assert dumped["chart_type"] == "pie"
+
+    def test_pie_percentages_computed_from_values(self):
+        """Validator computes correct percentages regardless of what the LLM output."""
+        chart = PieChartSpec(
+            title="Spending by Category",
+            currency="ARS",
+            slices=[
+                {"label": "Transferencias", "value": 18346.00, "percentage": 60.82},
+                {"label": "Fijos", "value": 12196.00, "percentage": 41.14},
+                {"label": "Otros", "value": 1707.54, "percentage": 5.76},
+                {"label": "Restaurantes", "value": 1111.48, "percentage": 3.73},
+            ],
+        )
+        total = sum(s.value for s in chart.slices)
+        for s in chart.slices:
+            assert abs(s.percentage - round(s.value / total * 100, 2)) < 0.01
+        assert abs(sum(s.percentage for s in chart.slices) - 100.0) < 0.1
 
     def test_bar_chart_spec(self):
         chart = BarChartSpec(
@@ -234,7 +251,7 @@ class TestAgentResponseVisualization:
         chart = PieChartSpec(
             title="Test",
             currency="USD",
-            slices=[{"label": "A", "value": 100.0, "percentage": 100.0}],
+            slices=[{"label": "A", "value": 100.0}],
         )
         resp = AgentResponse(
             answer="test",

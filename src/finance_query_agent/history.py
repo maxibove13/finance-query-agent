@@ -11,6 +11,8 @@ from pydantic_ai.messages import (
     ToolReturnPart,
 )
 
+from finance_query_agent.config import get_settings
+
 KEEP_RECENT = 6
 SUMMARIZE_THRESHOLD = 20
 
@@ -27,7 +29,7 @@ _summarizer: Agent[None, str] | None = None
 def _get_summarizer() -> Agent[None, str]:
     global _summarizer
     if _summarizer is None:
-        _summarizer = Agent("openai:gpt-4o-mini", instructions=_SUMMARIZER_INSTRUCTIONS)
+        _summarizer = Agent(get_settings().secondary_model, instructions=_SUMMARIZER_INSTRUCTIONS)
     return _summarizer
 
 
