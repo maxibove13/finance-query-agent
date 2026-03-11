@@ -15,8 +15,6 @@ import os
 import pytest
 from moto import mock_aws
 
-from finance_query_agent.schemas.mapping import SchemaMapping
-
 pytestmark = pytest.mark.skipif(
     not os.environ.get("OPENAI_API_KEY"),
     reason="OPENAI_API_KEY not set — skipping e2e tests",
@@ -40,12 +38,10 @@ def _reset_singletons():
 
 
 @pytest.fixture
-def _env(postgres_url: str, sample_schema_mapping: SchemaMapping):
-    """Set env vars pointing at testcontainers Postgres + inline schema config."""
-    schema_json = sample_schema_mapping.model_dump_json()
+def _env(postgres_url: str):
+    """Set env vars pointing at testcontainers Postgres."""
     env = {
         "DATABASE_URL": postgres_url,
-        "SCHEMA_CONFIG_JSON": schema_json,
         "PRIMARY_MODEL": "openai:gpt-4.1-mini",
         "DYNAMODB_TABLE": "test-conversations",
         "DYNAMODB_REGION": "us-east-1",

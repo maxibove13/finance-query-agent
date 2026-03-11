@@ -7,7 +7,6 @@ import logging
 import time
 from typing import TYPE_CHECKING, Any
 
-from finance_query_agent.exceptions import SchemaValidationError
 from finance_query_agent.redaction import sanitize_error
 
 if TYPE_CHECKING:
@@ -45,9 +44,6 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     except ValueError as e:
         logger.warning("Invalid input: %s", e)
         return {"error": f"Invalid input: {e}"}
-    except SchemaValidationError as e:
-        logger.error("Schema config does not match database: %s", e)
-        return {"error": "schema_mismatch", "message": str(e)}
     except Exception as e:
         logger.exception("Agent request failed")
         return {"error": sanitize_error(e)}
@@ -58,15 +54,12 @@ async def _process_request(body: dict[str, Any]) -> AgentResponse:
     global _initialized  # noqa: PLW0603
 
     from finance_query_agent.agent import get_agent
-    from finance_query_agent.config import get_settings, load_schema_json
+    from finance_query_agent.config import get_settings
     from finance_query_agent.connection import Connection
     from finance_query_agent.encryption import FieldEncryptor
     from finance_query_agent.memory import ConversationMemory
-    from finance_query_agent.query_builder import QueryBuilder
-    from finance_query_agent.schemas.mapping import SchemaMapping
     from finance_query_agent.schemas.responses import AgentResponse, TokenUsage
     from finance_query_agent.tools import AgentDeps
-    from finance_query_agent.validation.schema_validator import validate_schema
 
     request_start = time.monotonic()
 
@@ -87,6 +80,21 @@ async def _process_request(body: dict[str, Any]) -> AgentResponse:
     if len(session_id) > settings.max_session_id_length:
         raise ValueError(f"session_id exceeds maximum length of {settings.max_session_id_length} characters")
 
+    # Cast user_id: int if numeric, str otherwise
+    if isinstance(raw_user_id, bool):
+        raise ValueError("user_id must be an integer or string, got bool")
+    if isinstance(raw_user_id, int):
+        int_user_id: int = raw_user_id
+        if int_user_id <= 0:
+            raise ValueError(f"user_id must be a positive integer, got {int_user_id}")
+        user_id: int | str = int_user_id
+    elif isinstance(raw_user_id, str) and raw_user_id.isdigit():
+        user_id = int(raw_user_id)
+        if user_id <= 0:
+            raise ValueError(f"user_id must be a positive integer, got {user_id}")
+    else:
+        user_id = str(raw_user_id)
+
     if not _initialized:
         from finance_query_agent.observability import initialize
 
@@ -100,26 +108,6 @@ async def _process_request(body: dict[str, Any]) -> AgentResponse:
     try:
         await conn.connect()
 
-        # Load and validate schema
-        schema_data = load_schema_json(settings)
-        schema = SchemaMapping(**schema_data)
-        type_info = await validate_schema(schema, conn)
-
-        # Cast user_id based on discovered DB column type
-        if type_info.user_id_type in ("int2", "int4", "int8", "integer", "bigint", "smallint"):
-            if isinstance(raw_user_id, int) and not isinstance(raw_user_id, bool):
-                user_id = raw_user_id
-            elif isinstance(raw_user_id, str) and raw_user_id.isdigit():
-                user_id = int(raw_user_id)
-            else:
-                raise ValueError(f"user_id must be an integer, got {type(raw_user_id).__name__}: {raw_user_id!r}")
-            if user_id <= 0:
-                raise ValueError(f"user_id must be a positive integer, got {user_id}")
-        else:
-            if not isinstance(raw_user_id, str) or not raw_user_id.strip():
-                raise ValueError("user_id must be a non-empty string")
-            user_id = raw_user_id  # type: ignore[assignment]
-
         # Load conversation history (DynamoDB always uses string keys)
         history = await memory.load_history(str(raw_user_id), session_id)
 
@@ -128,8 +116,7 @@ async def _process_request(body: dict[str, Any]) -> AgentResponse:
         from pydantic_ai.exceptions import UsageLimitExceeded
         from pydantic_ai.settings import ModelSettings
 
-        qb = QueryBuilder(schema)
-        deps = AgentDeps(connection=conn, query_builder=qb, schema=schema, user_id=user_id)
+        deps = AgentDeps(connection=conn, user_id=user_id)
         agent = get_agent(settings.primary_model)
 
         usage_limits = UsageLimits(request_limit=settings.agent_request_limit)

@@ -1,4 +1,4 @@
-"""Shared test fixtures: testcontainers Postgres, moto DynamoDB, sample schema."""
+"""Shared test fixtures: testcontainers Postgres, moto DynamoDB."""
 
 from __future__ import annotations
 
@@ -13,14 +13,6 @@ from testcontainers.postgres import PostgresContainer
 
 from finance_query_agent.connection import Connection
 from finance_query_agent.encryption import FieldEncryptor
-from finance_query_agent.query_builder import QueryBuilder
-from finance_query_agent.schemas.mapping import (
-    AmountConvention,
-    ColumnRef,
-    JoinDef,
-    SchemaMapping,
-    TableMapping,
-)
 
 
 def _docker_available() -> bool:
@@ -37,64 +29,10 @@ def skip_without_docker() -> None:
         pytest.skip("Docker not available")
 
 
-# ── Schema Mapping Fixture ──────────────────────────────────────────────────
+# ── Postgres Fixtures ────────────────────────────────────────────────────────
 
 SEED_USER_1 = 1
 SEED_USER_2 = 2
-
-
-@pytest.fixture(scope="session")
-def sample_schema_mapping() -> SchemaMapping:
-    return SchemaMapping(
-        transactions=TableMapping(
-            table="account_movements",
-            columns={
-                "date": "issued_at",
-                "amount": "amount",
-                "description": "description",
-                "user_id": ColumnRef(table="accounts", column="user_id"),
-                "currency": ColumnRef(table="accounts", column="currency"),
-                "account_id": "account_id",
-                "balance": "balance",
-            },
-            joins=[
-                JoinDef(table="accounts", on="account_movements.account_id = accounts.id", type="inner"),
-                JoinDef(table="tags", on="account_movements.category_id = tags.id", type="left"),
-            ],
-            amount_convention=AmountConvention(
-                direction_column="movement_direction",
-                expense_value="debit",
-                income_value="credit",
-            ),
-        ),
-        categories=TableMapping(table="tags", columns={"id": "id", "name": "name"}, user_scoped=False),
-        accounts=TableMapping(table="accounts", columns={"id": "id", "user_id": "user_id", "name": "alias"}),
-        secondary_transactions=TableMapping(
-            table="credit_card_movements",
-            columns={
-                "date": "issued_at",
-                "amount": "amount",
-                "description": "description",
-                "user_id": ColumnRef(table="credit_cards", column="user_id"),
-                "currency": "currency",
-                "account_id": "credit_card_id",
-            },
-            joins=[
-                JoinDef(
-                    table="credit_cards", on="credit_card_movements.credit_card_id = credit_cards.id", type="inner"
-                ),
-                JoinDef(table="tags", on="credit_card_movements.category_id = tags.id", type="left"),
-            ],
-            amount_convention=AmountConvention(
-                direction_column="movement_direction",
-                expense_value="debit",
-                income_value="credit",
-            ),
-        ),
-    )
-
-
-# ── Postgres Fixtures ────────────────────────────────────────────────────────
 
 SEED_SQL = """
 CREATE TYPE movementdirection AS ENUM ('credit', 'debit');
@@ -197,25 +135,58 @@ INSERT INTO credit_card_movements (credit_card_id, category_id, issued_at, amoun
 INSERT INTO credit_card_movements (credit_card_id, category_id, issued_at, amount, description, movement_direction, currency) VALUES (1, 5, '2025-12-20', 55.00, 'Steakhouse', 'debit', 'USD');
 INSERT INTO credit_card_movements (credit_card_id, category_id, issued_at, amount, description, movement_direction, currency) VALUES (1, 3, '2026-01-10', 15.99, 'Spotify', 'debit', 'USD');
 INSERT INTO credit_card_movements (credit_card_id, category_id, issued_at, amount, description, movement_direction, currency) VALUES (1, 3, '2026-02-10', 15.99, 'Spotify', 'debit', 'USD');
+
+-- RLS: scope accounts and credit_cards by user_id
+ALTER TABLE accounts ENABLE ROW LEVEL SECURITY;
+CREATE POLICY user_isolation ON accounts FOR SELECT
+  USING (user_id = NULLIF(current_setting('app.user_id', true), '')::integer);
+
+ALTER TABLE credit_cards ENABLE ROW LEVEL SECURITY;
+CREATE POLICY user_isolation ON credit_cards FOR SELECT
+  USING (user_id = NULLIF(current_setting('app.user_id', true), '')::integer);
+
+-- Movements don't have user_id directly; isolation via correlated subquery
+ALTER TABLE account_movements ENABLE ROW LEVEL SECURITY;
+CREATE POLICY user_isolation ON account_movements FOR SELECT
+  USING (account_id IN (
+    SELECT id FROM accounts
+    WHERE user_id = NULLIF(current_setting('app.user_id', true), '')::integer
+  ));
+
+ALTER TABLE credit_card_movements ENABLE ROW LEVEL SECURITY;
+CREATE POLICY user_isolation ON credit_card_movements FOR SELECT
+  USING (credit_card_id IN (
+    SELECT id FROM credit_cards
+    WHERE user_id = NULLIF(current_setting('app.user_id', true), '')::integer
+  ));
+
+-- Non-superuser app role so RLS is enforced during tests
+CREATE ROLE app_user WITH LOGIN PASSWORD 'app_test_pw';
+GRANT USAGE ON SCHEMA public TO app_user;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO app_user;
 """
 
 
 @pytest.fixture(scope="session")
 def postgres_url():
-    """Start a Postgres container and seed it with test data."""
+    """Start a Postgres container, seed with test data, yield app_user URL (non-superuser for RLS)."""
     skip_without_docker()
     with PostgresContainer("postgres:16-alpine") as pg:
-        url = pg.get_connection_url().replace("postgresql+psycopg2://", "postgresql://")
+        admin_url = pg.get_connection_url().replace("postgresql+psycopg2://", "postgresql://")
 
         async def _seed():
-            conn = await asyncpg.connect(url)
+            conn = await asyncpg.connect(admin_url)
             try:
                 await conn.execute(SEED_SQL)
             finally:
                 await conn.close()
 
         asyncio.get_event_loop_policy().new_event_loop().run_until_complete(_seed())
-        yield url
+
+        # Yield the non-superuser URL so RLS policies are enforced
+        host = pg.get_container_host_ip()
+        port = pg.get_exposed_port(5432)
+        yield f"postgresql://app_user:app_test_pw@{host}:{port}/test"
 
 
 @pytest.fixture
@@ -232,11 +203,6 @@ async def db_connection(postgres_url: str):
         if conn_module._pool is not None:
             await conn_module._pool.close()
             conn_module._pool = None
-
-
-@pytest.fixture
-def query_builder(sample_schema_mapping: SchemaMapping) -> QueryBuilder:
-    return QueryBuilder(sample_schema_mapping)
 
 
 # ── DynamoDB Fixtures ────────────────────────────────────────────────────────

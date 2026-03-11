@@ -103,3 +103,15 @@ class Connection:
             raise QueryTimeoutError(str(exc)) from exc
         except asyncpg.PostgresError as exc:
             raise DatabaseConnectionError(str(exc)) from exc
+
+    async def execute_governed(self, sql: str, user_id: Any) -> list[Any]:
+        """Run sql in a readonly transaction with app.user_id set for RLS."""
+        try:
+            async with self._get_pool().acquire() as conn:
+                async with conn.transaction(readonly=True):
+                    await conn.execute("SELECT set_config('app.user_id', $1, true)", str(user_id))
+                    return await conn.fetch(sql)  # type: ignore[no-any-return]
+        except asyncpg.QueryCanceledError as exc:
+            raise QueryTimeoutError(str(exc)) from exc
+        except asyncpg.PostgresError as exc:
+            raise DatabaseConnectionError(str(exc)) from exc

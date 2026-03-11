@@ -19,34 +19,34 @@ from finance_query_agent.schemas.charts import (
 
 logger = logging.getLogger(__name__)
 
-CHARTABLE_TOOLS = frozenset({"query_expenses", "query_income", "query_balance_history"})
+CHARTABLE_TOOLS = frozenset({"execute_sql"})
 
 _SYSTEM_PROMPT = """\
 You are a financial data visualization agent. Given a user's original question and \
-the structured data returned by query tools, produce chart specifications.
+the structured SQL query results, produce chart specifications.
 
 ## Available chart types
 
 ### pie
 Category proportions (spending by category, breakdowns).
 - slices: list of {label, value}
-- Good for: query_expenses (group_by=category)
+- Good for: results grouped by category name
 
 ### bar
 Categorical or time-series comparison.
 - bars: list of {label, value}
-- Good for: query_expenses (group_by=month or merchant), query_income
+- Good for: results grouped by month or merchant
 
 ### line
 Trends over time.
 - points: list of {label, value} where label is a time period
-- Good for: query_expenses (group_by=month), query_balance_history (multiple snapshots)
+- Good for: monthly spending trends, balance history over time
 
 ### grouped_bar
 Side-by-side period comparison.
 - groups: list of {label, value_a, value_b}
 - series_labels: tuple of two period names (e.g., ["Jan 2026", "Feb 2026"])
-- Good for: comparing two query_expenses results with different date ranges
+- Good for: comparing results from two different date ranges
 
 ## Rules
 

@@ -17,13 +17,17 @@ class TestBuildSystemPrompt:
         prompt = build_system_prompt()
         assert datetime.date.today().isoformat() in prompt
 
-    def test_includes_tool_selection_guidance(self) -> None:
+    def test_includes_schema_tables(self) -> None:
         prompt = build_system_prompt()
-        assert "query_expenses" in prompt
-        assert "query_income" in prompt
-        assert "query_balance_history" in prompt
-        assert "search_transactions" in prompt
-        assert "get_recurring_expenses" in prompt
+        assert "account_movements" in prompt
+        assert "accounts" in prompt
+        assert "credit_card_movements" in prompt
+        assert "movement_direction" in prompt
+
+    def test_includes_amount_convention(self) -> None:
+        prompt = build_system_prompt()
+        assert "debit" in prompt
+        assert "credit" in prompt
 
     def test_includes_visualization_guidance(self) -> None:
         prompt = build_system_prompt()
@@ -31,28 +35,20 @@ class TestBuildSystemPrompt:
         assert "final_answer" in prompt
         assert "visualization agent" in prompt
 
-    def test_includes_currency_guidance(self) -> None:
-        prompt = build_system_prompt()
-        assert '"local"' in prompt
-        assert '"usd"' in prompt
-        assert "Never compute exchange rates or convert amounts yourself" in prompt
-
     def test_includes_language_mirroring(self) -> None:
         prompt = build_system_prompt()
         assert "same language" in prompt
 
-    def test_no_deleted_tool_references(self) -> None:
+    def test_no_old_tool_references(self) -> None:
         prompt = build_system_prompt()
         for deleted in (
-            "get_spending_by_category",
-            "get_monthly_totals",
-            "get_balance_summary",
-            "get_top_merchants",
-            "compare_periods",
-            "get_spending_trend",
-            "get_category_breakdown",
+            "query_expenses",
+            "query_income",
+            "query_balance_history",
+            "search_transactions",
+            "get_recurring_expenses",
         ):
-            assert deleted not in prompt, f"Deleted tool '{deleted}' still referenced in system prompt"
+            assert deleted not in prompt, f"Old tool '{deleted}' still referenced in system prompt"
 
 
 class TestGetAgent:
@@ -62,16 +58,10 @@ class TestGetAgent:
     def teardown_method(self) -> None:
         agent_module._agents.clear()
 
-    def test_returns_agent_with_all_tools(self) -> None:
+    def test_returns_agent_with_execute_sql_tool(self) -> None:
         agent = get_agent(_TEST_MODEL)
         tool_names = set(agent._function_toolset.tools.keys())
-        assert tool_names == {
-            "search_transactions",
-            "get_recurring_expenses",
-            "query_expenses",
-            "query_income",
-            "query_balance_history",
-        }
+        assert tool_names == {"execute_sql"}
 
     def test_singleton_behavior(self) -> None:
         a1 = get_agent(_TEST_MODEL)

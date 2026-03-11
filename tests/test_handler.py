@@ -12,7 +12,6 @@ from pydantic_ai.exceptions import UsageLimitExceeded
 import finance_query_agent.handler as handler_module
 from finance_query_agent.handler import _process_request, handler
 from finance_query_agent.schemas.responses import AnswerWithVisualization, TextAnswer
-from finance_query_agent.validation.schema_validator import ColumnTypeInfo
 
 _PATCH_TARGET = "finance_query_agent.handler._process_request"
 
@@ -37,19 +36,6 @@ class TestHandler:
             result = handler({"session_id": "s1"}, None)
 
         assert "user_id" in result["error"]
-
-    def test_returns_error_on_schema_mismatch(self) -> None:
-        from finance_query_agent.exceptions import SchemaValidationError
-
-        with patch(
-            _PATCH_TARGET,
-            new_callable=AsyncMock,
-            side_effect=SchemaValidationError("column 'foo' does not exist on table 'bar'"),
-        ):
-            result = handler(_EVENT, None)
-
-        assert result["error"] == "schema_mismatch"
-        assert "foo" in result["message"]
 
     def test_returns_error_on_unexpected_error(self) -> None:
         with patch(_PATCH_TARGET, new_callable=AsyncMock, side_effect=RuntimeError("boom")):
@@ -95,15 +81,9 @@ def _build_mocks() -> dict:
     targets = {
         "finance_query_agent.observability.initialize": MagicMock(),
         "finance_query_agent.config.get_settings": MagicMock(return_value=settings),
-        "finance_query_agent.config.load_schema_json": MagicMock(return_value={}),
-        "finance_query_agent.schemas.mapping.SchemaMapping": MagicMock(),
         "finance_query_agent.connection.Connection": MagicMock(return_value=conn),
         "finance_query_agent.encryption.FieldEncryptor": MagicMock(),
         "finance_query_agent.memory.ConversationMemory": MagicMock(return_value=memory),
-        "finance_query_agent.query_builder.QueryBuilder": MagicMock(),
-        "finance_query_agent.validation.schema_validator.validate_schema": AsyncMock(
-            return_value=ColumnTypeInfo(user_id_type="int4", direction_is_enum=True)
-        ),
         "finance_query_agent.agent.get_agent": MagicMock(return_value=agent),
     }
 
@@ -266,7 +246,6 @@ class TestProcessRequest:
     @pytest.mark.asyncio()
     async def test_text_answer_skips_visualization(self, mocks: dict) -> None:
         """TextAnswer output should never trigger the viz pipeline."""
-        # result.output is already TextAnswer from _build_mocks
         with ExitStack() as stack:
             _apply(stack, mocks["targets"])
             viz_mock = stack.enter_context(
@@ -283,12 +262,11 @@ class TestProcessRequest:
         result_mock = mocks["agent"].run.return_value
         result_mock.output = AnswerWithVisualization(answer="Here's your breakdown")
 
-        # Make agent.run populate tool_results on deps
         original_return = result_mock
 
         async def _run_with_results(*args, **kwargs):
             deps = kwargs["deps"]
-            deps.tool_results = [("query_expenses", ["a", "b"])]
+            deps.tool_results = [("execute_sql", ["a", "b"])]
             return original_return
 
         mocks["agent"].run = AsyncMock(side_effect=_run_with_results)
@@ -322,7 +300,7 @@ class TestProcessRequest:
 
     @pytest.mark.asyncio()
     async def test_answer_with_viz_skips_when_guardrails_fail(self, mocks: dict) -> None:
-        """AnswerWithVisualization but non-chartable data should not trigger viz."""
+        """AnswerWithVisualization but only 1 row (not enough to chart) should not trigger viz."""
         result_mock = mocks["agent"].run.return_value
         result_mock.output = AnswerWithVisualization(answer="No chart for you")
 
@@ -330,7 +308,7 @@ class TestProcessRequest:
 
         async def _run_with_results(*args, **kwargs):
             deps = kwargs["deps"]
-            deps.tool_results = [("search_transactions", ["a", "b"])]
+            deps.tool_results = [("execute_sql", [{"only": "one row"}])]  # 1 row → should_visualize=False
             return original_return
 
         mocks["agent"].run = AsyncMock(side_effect=_run_with_results)
@@ -351,7 +329,7 @@ class TestProcessRequest:
 
 
 class TestInputValidation:
-    """Tests for input validation added in _process_request."""
+    """Tests for input validation in _process_request."""
 
     @pytest.fixture(autouse=True)
     def _reset_init(self):

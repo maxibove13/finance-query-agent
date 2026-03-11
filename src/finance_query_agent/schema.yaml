@@ -1,0 +1,146 @@
+description: |
+  Financial database schema for a personal finance tracking app.
+  User data is automatically scoped to the authenticated user via Row Level Security (RLS).
+  Do NOT include user_id in WHERE clauses — filtering is handled transparently.
+  All amount values are stored as positive numbers.
+
+business_rules:
+  amount_convention: |
+    movement_direction = 'debit'  → expense / money leaving (groceries, bills, subscriptions)
+    movement_direction = 'credit' → income / money arriving (salary, refunds, transfers in)
+  user_isolation: |
+    Data is automatically filtered to the current user. Never add user_id conditions.
+  amounts: |
+    All amounts are stored as positive numbers. Use movement_direction to determine direction.
+  text_search: |
+    Use ILIKE '%term%' for case-insensitive substring matching on description or category name.
+  dates: |
+    issued_at is a DATE column. Use DATE_TRUNC, EXTRACT, and interval arithmetic for date math.
+    Example: current month start = DATE_TRUNC('month', CURRENT_DATE)
+    Example: last month = issued_at >= DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month')
+              AND issued_at < DATE_TRUNC('month', CURRENT_DATE)
+
+tables:
+  accounts:
+    description: User's bank accounts (savings, checking, etc.)
+    columns:
+      id: "integer — primary key"
+      alias: "text — human-readable account name, e.g. 'Checking', 'Savings UYU'"
+      currency: "char(3) — account base currency, e.g. 'USD', 'UYU', 'EUR'"
+
+  account_movements:
+    description: |
+      Individual debit/credit transactions on bank accounts.
+      Each row is one transaction. Join to accounts for currency and alias.
+      Join to tags for category name.
+    columns:
+      id: "integer — primary key"
+      account_id: "integer — FK → accounts.id"
+      category_id: "integer, nullable — FK → tags.id (NULL if uncategorized)"
+      issued_at: "date — transaction date"
+      amount: "numeric(15,2) — always positive; direction is in movement_direction"
+      description: "text — merchant name or transaction description"
+      movement_direction: "enum('debit','credit') — debit=expense, credit=income"
+      balance: "numeric(15,2), nullable — running account balance after this transaction"
+
+  tags:
+    description: |
+      Shared category labels. Not user-scoped — categories are global to all users.
+      Common values: groceries, transport, entertainment, utilities, restaurants.
+    columns:
+      id: "integer — primary key"
+      name: "text — category name"
+
+  credit_cards:
+    description: User's credit cards.
+    columns:
+      id: "integer — primary key"
+      currency: "char(3) — card base currency"
+
+  credit_card_movements:
+    description: |
+      Individual transactions on credit cards.
+      Same movement_direction convention as account_movements.
+      currency column is on the row itself (can differ from card base currency).
+    columns:
+      id: "integer — primary key"
+      credit_card_id: "integer — FK → credit_cards.id"
+      category_id: "integer, nullable — FK → tags.id"
+      issued_at: "date — transaction date"
+      amount: "numeric(15,2) — always positive"
+      description: "text — merchant or transaction description"
+      movement_direction: "enum('debit','credit') — debit=expense, credit=refund/payment"
+      currency: "char(3) — transaction currency"
+
+relationships:
+  - "account_movements JOIN accounts ON account_movements.account_id = accounts.id"
+  - "account_movements LEFT JOIN tags ON account_movements.category_id = tags.id"
+  - "credit_card_movements JOIN credit_cards ON credit_card_movements.credit_card_id = credit_cards.id"
+  - "credit_card_movements LEFT JOIN tags ON credit_card_movements.category_id = tags.id"
+
+common_queries:
+  - question: What did I spend on groceries last month?
+    sql: |
+      SELECT COALESCE(SUM(am.amount), 0) AS total, a.currency
+      FROM account_movements am
+      JOIN accounts a ON am.account_id = a.id
+      LEFT JOIN tags t ON am.category_id = t.id
+      WHERE am.movement_direction = 'debit'
+        AND t.name ILIKE 'groceries'
+        AND am.issued_at >= DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month')
+        AND am.issued_at < DATE_TRUNC('month', CURRENT_DATE)
+      GROUP BY a.currency
+
+  - question: What is my total income per month this year?
+    sql: |
+      SELECT
+        DATE_TRUNC('month', am.issued_at) AS month,
+        a.currency,
+        SUM(am.amount) AS total_income
+      FROM account_movements am
+      JOIN accounts a ON am.account_id = a.id
+      WHERE am.movement_direction = 'credit'
+        AND EXTRACT(YEAR FROM am.issued_at) = EXTRACT(YEAR FROM CURRENT_DATE)
+      GROUP BY DATE_TRUNC('month', am.issued_at), a.currency
+      ORDER BY month
+
+  - question: Find all Netflix charges
+    sql: |
+      SELECT issued_at, amount, a.currency, description
+      FROM account_movements am
+      JOIN accounts a ON am.account_id = a.id
+      WHERE am.movement_direction = 'debit'
+        AND am.description ILIKE '%netflix%'
+      UNION ALL
+      SELECT issued_at, amount, currency, description
+      FROM credit_card_movements
+      WHERE movement_direction = 'debit'
+        AND description ILIKE '%netflix%'
+      ORDER BY issued_at DESC
+
+  - question: What are my top spending categories this month?
+    sql: |
+      SELECT
+        COALESCE(t.name, 'Uncategorized') AS category,
+        SUM(am.amount) AS total,
+        a.currency
+      FROM account_movements am
+      JOIN accounts a ON am.account_id = a.id
+      LEFT JOIN tags t ON am.category_id = t.id
+      WHERE am.movement_direction = 'debit'
+        AND am.issued_at >= DATE_TRUNC('month', CURRENT_DATE)
+      GROUP BY t.name, a.currency
+      ORDER BY total DESC
+
+  - question: What is my spending trend month over month for the last 6 months (bank accounts only)?
+    sql: |
+      SELECT
+        DATE_TRUNC('month', am.issued_at) AS month,
+        a.currency,
+        SUM(am.amount) AS total_expenses
+      FROM account_movements am
+      JOIN accounts a ON am.account_id = a.id
+      WHERE am.movement_direction = 'debit'
+        AND am.issued_at >= DATE_TRUNC('month', CURRENT_DATE - INTERVAL '5 months')
+      GROUP BY DATE_TRUNC('month', am.issued_at), a.currency
+      ORDER BY month

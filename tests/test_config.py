@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from finance_query_agent.config import Settings, _resolve_secret, _resolve_ssm_parameter, load_schema_json
+from finance_query_agent.config import Settings, _resolve_secret
 
 
 class TestLoadFromEnv:
@@ -31,27 +31,6 @@ class TestLoadFromEnv:
         assert s.agent_request_limit == 7
         assert s.agent_per_request_timeout == 12.0
         assert s.agent_run_timeout == 25.0
-
-
-class TestLoadSchema:
-    def test_load_schema_from_inline_json(self) -> None:
-        data = {"transactions": {"table": "txns"}}
-        s = Settings(schema_config_json=json.dumps(data))  # type: ignore[call-arg]
-        result = load_schema_json(s)
-        assert result == data
-
-    def test_load_schema_from_file(self, tmp_path: pytest.TempPathFactory) -> None:
-        data = {"transactions": {"table": "txns"}}
-        p = tmp_path / "schema.json"  # type: ignore[operator]
-        p.write_text(json.dumps(data))
-        s = Settings(schema_config_path=str(p))  # type: ignore[call-arg]
-        result = load_schema_json(s)
-        assert result == data
-
-    def test_load_schema_raises_when_neither_set(self) -> None:
-        s = Settings()
-        with pytest.raises(ValueError, match="schema_config_json or schema_config_path"):
-            load_schema_json(s)
 
 
 class TestResolveSecrets:
@@ -110,35 +89,6 @@ class TestResolveSecrets:
             s.resolve_secrets()
 
 
-class TestResolveSSM:
-    def test_ssm_param_populates_schema_config_json(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        schema_data = {"transactions": {"table": "txns"}}
-        expected_json = json.dumps(schema_data)
-
-        monkeypatch.setattr(
-            "finance_query_agent.config._resolve_ssm_parameter",
-            lambda name: expected_json,
-        )
-
-        s = Settings(schema_config_ssm_param="/test/schema-config")  # type: ignore[call-arg]
-        s.resolve_secrets()
-        assert s.schema_config_json == expected_json
-
-    def test_env_var_takes_precedence_over_ssm(self) -> None:
-        """When both schema_config_json and ssm_param are set, env var wins."""
-        s = Settings(
-            schema_config_json='{"already": "set"}',  # type: ignore[call-arg]
-            schema_config_ssm_param="/test/schema-config",  # type: ignore[call-arg]
-        )
-        s.resolve_secrets()
-        assert s.schema_config_json == '{"already": "set"}'
-
-    def test_ssm_not_called_when_param_not_set(self) -> None:
-        """When schema_config_ssm_param is None, no SSM call."""
-        s = Settings()
-        s.resolve_secrets()
-
-
 class TestResolveSecretLogging:
     def test_logs_on_secrets_manager_error(self, caplog: pytest.LogCaptureFixture) -> None:
         mock_client = MagicMock()
@@ -149,13 +99,3 @@ class TestResolveSecretLogging:
                     _resolve_secret("arn:aws:secretsmanager:us-east-1:123:secret:test")
         assert "Failed to resolve secret" in caplog.text
         assert "arn:aws:secretsmanager:us-east-1:123:secret:test" in caplog.text
-
-    def test_logs_on_ssm_error(self, caplog: pytest.LogCaptureFixture) -> None:
-        mock_client = MagicMock()
-        mock_client.get_parameter.side_effect = Exception("ParameterNotFound")
-        with patch("boto3.client", return_value=mock_client):
-            with caplog.at_level(logging.ERROR, logger="finance_query_agent.config"):
-                with pytest.raises(Exception, match="ParameterNotFound"):
-                    _resolve_ssm_parameter("/test/param")
-        assert "Failed to resolve SSM parameter" in caplog.text
-        assert "/test/param" in caplog.text

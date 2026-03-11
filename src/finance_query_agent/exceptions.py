@@ -5,10 +5,6 @@ class FinanceQueryError(Exception):
     """Base exception for all finance query agent errors."""
 
 
-class SchemaValidationError(FinanceQueryError):
-    """Schema mapping does not match the live database."""
-
-
 class DatabaseConnectionError(FinanceQueryError):
     """Database connection error (creation, health, closure)."""
 

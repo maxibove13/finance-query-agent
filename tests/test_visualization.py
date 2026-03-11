@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from decimal import Decimal
 from unittest.mock import AsyncMock, patch
 
 from finance_query_agent.schemas.charts import (
@@ -12,8 +11,6 @@ from finance_query_agent.schemas.charts import (
     LineChartSpec,
     PieChartSpec,
 )
-from finance_query_agent.schemas.tool_results import RecurringExpense
-from finance_query_agent.schemas.unified_results import ExpenseGroup, IncomeMonth
 from finance_query_agent.visualization import (
     _chartable_row_count,
     _serialize_tool_results,
@@ -21,75 +18,58 @@ from finance_query_agent.visualization import (
     should_visualize,
 )
 
+# -- sample data for execute_sql results ------------------------------------
+
+_TWO_EXPENSE_ROWS = [
+    {"category": "Food", "total": 100.0, "currency": "USD"},
+    {"category": "Transport", "total": 50.0, "currency": "USD"},
+]
+
+_ONE_ROW = [{"category": "Food", "total": 100.0, "currency": "USD"}]
+
+
 # -- should_visualize --------------------------------------------------------
 
 
-_TWO_EXPENSES = [
-    ExpenseGroup(label="Food", total_amount=Decimal("100"), transaction_count=5, currency="usd"),
-    ExpenseGroup(label="Transport", total_amount=Decimal("50"), transaction_count=3, currency="usd"),
-]
-
-
 class TestShouldVisualize:
-    def test_returns_true_for_query_expenses(self):
-        assert should_visualize([("query_expenses", _TWO_EXPENSES)]) is True
+    def test_returns_true_for_execute_sql_with_enough_rows(self):
+        assert should_visualize([("execute_sql", _TWO_EXPENSE_ROWS)]) is True
 
-    def test_returns_true_for_query_income(self):
-        data = [
-            IncomeMonth(month_label="2025/01", total_amount=Decimal("3000"), currency="usd"),
-            IncomeMonth(month_label="2025/02", total_amount=Decimal("3200"), currency="usd"),
-        ]
-        assert should_visualize([("query_income", data)]) is True
-
-    def test_returns_false_for_non_chartable_tools(self):
-        assert should_visualize([("search_transactions", ["a", "b"])]) is False
-
-    def test_returns_false_for_recurring_expenses(self):
-        assert should_visualize([("get_recurring_expenses", ["a", "b"])]) is False
-
-    def test_returns_true_for_balance_history(self):
-        assert should_visualize([("query_balance_history", ["a", "b"])]) is True
+    def test_returns_false_for_single_row(self):
+        assert should_visualize([("execute_sql", _ONE_ROW)]) is False
 
     def test_returns_false_for_empty(self):
         assert should_visualize([]) is False
 
-    def test_returns_false_for_single_row(self):
-        assert should_visualize([("query_expenses", [_TWO_EXPENSES[0]])]) is False
+    def test_returns_false_for_empty_data(self):
+        assert should_visualize([("execute_sql", [])]) is False
 
-    def test_returns_false_for_empty_chartable_data(self):
-        assert should_visualize([("query_expenses", [])]) is False
-
-    def test_mixed_chartable_and_non_chartable(self):
+    def test_rows_accumulate_across_multiple_execute_sql_calls(self):
         results = [
-            ("search_transactions", []),
-            ("query_expenses", _TWO_EXPENSES),
+            ("execute_sql", _ONE_ROW),
+            ("execute_sql", _ONE_ROW),
         ]
         assert should_visualize(results) is True
 
-    def test_rows_accumulate_across_chartable_tools(self):
-        income = IncomeMonth(month_label="2025/01", total_amount=Decimal("3000"), currency="usd")
-        results = [
-            ("query_expenses", [_TWO_EXPENSES[0]]),
-            ("query_income", [income]),
-        ]
-        assert should_visualize(results) is True
+    def test_non_chartable_tool_not_counted(self):
+        # only execute_sql is chartable; a tool called something else is not
+        assert should_visualize([("other_tool", _TWO_EXPENSE_ROWS)]) is False
 
 
 class TestChartableRowCount:
     def test_counts_list_items(self):
-        assert _chartable_row_count([("query_expenses", _TWO_EXPENSES)]) == 2
+        assert _chartable_row_count([("execute_sql", _TWO_EXPENSE_ROWS)]) == 2
 
     def test_counts_non_list_as_one(self):
-        assert _chartable_row_count([("query_expenses", "scalar")]) == 1
+        assert _chartable_row_count([("execute_sql", "scalar")]) == 1
 
     def test_ignores_non_chartable(self):
-        assert _chartable_row_count([("search_transactions", ["a", "b", "c"])]) == 0
+        assert _chartable_row_count([("other_tool", ["a", "b", "c"])]) == 0
 
-    def test_sums_across_tools(self):
-        income = IncomeMonth(month_label="2025/01", total_amount=Decimal("3000"), currency="usd")
+    def test_sums_across_multiple_calls(self):
         results = [
-            ("query_expenses", [_TWO_EXPENSES[0]]),
-            ("query_income", [income, income]),
+            ("execute_sql", _ONE_ROW),
+            ("execute_sql", _TWO_EXPENSE_ROWS),
         ]
         assert _chartable_row_count(results) == 3
 
@@ -98,57 +78,27 @@ class TestChartableRowCount:
 
 
 class TestSerializeToolResults:
-    def test_serializes_pydantic_models(self):
-        data = [
-            ExpenseGroup(label="Food", total_amount=Decimal("100"), transaction_count=5, currency="usd"),
-        ]
-        result = _serialize_tool_results([("query_expenses", data)])
-        assert "query_expenses" in result
+    def test_serializes_dict_rows(self):
+        result = _serialize_tool_results([("execute_sql", _TWO_EXPENSE_ROWS)])
+        assert "execute_sql" in result
         assert "Food" in result
         assert "100" in result
 
     def test_skips_non_chartable_tools(self):
-        data = [
-            RecurringExpense(
-                merchant_name="Netflix",
-                estimated_amount=Decimal("12.99"),
-                frequency="monthly",
-                occurrences=3,
-                total_amount=Decimal("38.97"),
-                currency="USD",
-            ),
-        ]
-        result = _serialize_tool_results([("get_recurring_expenses", data)])
+        result = _serialize_tool_results([("other_tool", _TWO_EXPENSE_ROWS)])
         assert result == ""
 
-    def test_handles_multiple_tools(self):
-        expenses = [
-            ExpenseGroup(label="Food", total_amount=Decimal("100"), transaction_count=5, currency="usd"),
+    def test_handles_multiple_execute_sql_calls(self):
+        results = [
+            ("execute_sql", _TWO_EXPENSE_ROWS),
+            ("execute_sql", [{"month": "2025-01", "total": 3000.0}]),
         ]
-        income = [
-            IncomeMonth(month_label="2025/01", total_amount=Decimal("3000"), currency="usd"),
-        ]
-        result = _serialize_tool_results(
-            [
-                ("query_expenses", expenses),
-                ("query_income", income),
-            ]
-        )
-        assert "query_expenses" in result
-        assert "query_income" in result
-
-    def test_serializes_query_expenses_results(self):
-        data = [
-            ExpenseGroup(label="Food", total_amount=Decimal("100"), transaction_count=5, currency="usd"),
-        ]
-        result = _serialize_tool_results([("query_expenses", data)])
-        assert "query_expenses" in result
-        assert "Food" in result
-        assert "100" in result
+        result = _serialize_tool_results(results)
+        assert result.count("execute_sql") == 2
 
     def test_empty_data_still_serializes(self):
-        result = _serialize_tool_results([("query_expenses", [])])
-        assert "query_expenses" in result
+        result = _serialize_tool_results([("execute_sql", [])])
+        assert "execute_sql" in result
         assert "[]" in result
 
 
@@ -294,14 +244,13 @@ class TestAgentResponseVisualization:
 class TestGenerateVisualizations:
     def test_returns_none_for_non_chartable(self):
         result = asyncio.run(
-            generate_visualizations("query", [("search_transactions", ["a", "b"])]),
+            generate_visualizations("query", [("other_tool", ["a", "b"])]),
         )
         assert result is None
 
     def test_returns_none_for_single_row(self):
-        data = [ExpenseGroup(label="Food", total_amount=Decimal("100"), transaction_count=5, currency="usd")]
         result = asyncio.run(
-            generate_visualizations("query", [("query_expenses", data)]),
+            generate_visualizations("query", [("execute_sql", _ONE_ROW)]),
         )
         assert result is None
 
@@ -319,7 +268,7 @@ class TestGenerateVisualizations:
             async def _run():
                 try:
                     return await asyncio.wait_for(
-                        generate_visualizations("spending?", [("query_expenses", _TWO_EXPENSES)]),
+                        generate_visualizations("spending?", [("execute_sql", _TWO_EXPENSE_ROWS)]),
                         timeout=0.1,
                     )
                 except TimeoutError:
