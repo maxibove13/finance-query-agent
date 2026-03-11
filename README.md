@@ -11,9 +11,12 @@ graph LR
     subgraph QUERY_AGENT["Query Agent (Pydantic AI)"]
         direction TB
         subgraph PREDEFINED["Predefined Tools"]
-            direction LR
-            V["query_expenses\nquery_income\nquery_balance_history"]
-            D["search_transactions\nget_recurring_expenses"]
+            direction TB
+            T1["query_expenses"]
+            T2["query_income"]
+            T3["query_balance_history"]
+            T4["search_transactions"]
+            T5["get_recurring_expenses"]
         end
     end
 
@@ -21,17 +24,18 @@ graph LR
     QUERY_AGENT -->|"AnswerWithVisualization"| VIZ_AGENT
 
     subgraph VIZ_AGENT["Visualization Agent"]
-        direction TB
-        VIZ_IN["Chartable tool results\n(≥ 2 rows)"]
         VIZ_OUT["pie · bar · line · grouped_bar"]
     end
 
     VIZ_AGENT --> OUT_VIZ["Text + Chart Specs"]
 
-    V --> MV[("Materialized Views\n(pre-computed)")]
-    D --> QB["QueryBuilder\n(SchemaMapping → SQL)"]
-    QB --> PG[("PostgreSQL")]
-    MV --> PG
+    T1 --> MV[("Materialized Views<br/>(pre-computed)")]
+    T2 --> MV
+    T3 --> MV
+    T4 --> QB["QueryBuilder<br/>(SchemaMapping → SQL)"]
+    T5 --> QB
+    MV --> PG[("PostgreSQL")]
+    QB --> PG
 
     style QUERY_AGENT fill:#2a2a3c,stroke:#88c,color:#fff
     style PREDEFINED fill:#2d5a3d,stroke:#4a9,color:#fff
@@ -318,6 +322,25 @@ Example view mapping (maps `historical_expenses_mv` materialized view):
 ```
 
 See `docs/finance-query-agent-spec.md` Section 6 for the full specification, and `localstack/schema-config.json` for a complete working example.
+
+### Schema Config in Production
+
+The schema config JSON is stored in **AWS SSM Parameter Store** at `/finance-query-agent/schema-config`. It is seeded by Terraform on first apply (`terraform/main.tf`) with `lifecycle { ignore_changes = [value] }` — meaning Terraform never overwrites it after that. All subsequent updates go directly via the AWS CLI or MPI's CI/CD.
+
+The Lambda reads `SCHEMA_CONFIG_SSM_PARAM` on cold start and caches it for the lifetime of the container.
+
+To update the schema config in production:
+
+```bash
+aws ssm put-parameter \
+  --name "/finance-query-agent/schema-config" \
+  --value "$(cat localstack/schema-config.json)" \
+  --overwrite \
+  --profile my_personal_incomes \
+  --region us-east-1
+```
+
+The change takes effect on the next Lambda cold start.
 
 ## Invocation
 
