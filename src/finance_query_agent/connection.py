@@ -104,6 +104,23 @@ class Connection:
         except asyncpg.PostgresError as exc:
             raise DatabaseConnectionError(str(exc)) from exc
 
+    async def verify_rls_enabled(self, tables: list[str], strict: bool = False) -> None:
+        """Check that RLS is enabled on the given tables.
+
+        Logs CRITICAL if any table has RLS disabled. Raises DatabaseConnectionError
+        when strict=True (production Lambda context).
+        """
+        rows = await self.fetch(
+            "SELECT relname FROM pg_class WHERE relname = ANY($1) AND NOT relrowsecurity",
+            tables,
+        )
+        if rows:
+            missing = sorted(r["relname"] for r in rows)
+            msg = f"Row Level Security is not enabled on: {missing}. Apply RLS policies before deploying."
+            logger.critical(msg)
+            if strict:
+                raise DatabaseConnectionError(msg)
+
     async def execute_governed(self, sql: str, user_id: Any) -> list[Any]:
         """Run sql in a readonly transaction with app.user_id set for RLS."""
         try:

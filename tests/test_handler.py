@@ -77,6 +77,7 @@ def _build_mocks() -> dict:
     settings.secondary_model = "test:viz"
     settings.max_question_length = 2000
     settings.max_session_id_length = 128
+    settings.aws_lambda_function_name = None
 
     targets = {
         "finance_query_agent.observability.initialize": MagicMock(),

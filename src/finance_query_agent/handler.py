@@ -95,11 +95,6 @@ async def _process_request(body: dict[str, Any]) -> AgentResponse:
     else:
         user_id = str(raw_user_id)
 
-    if not _initialized:
-        from finance_query_agent.observability import initialize
-
-        _initialized = initialize()
-
     encryptor = FieldEncryptor(settings.encryption_key)
     memory = ConversationMemory(settings.dynamodb_table, settings.dynamodb_region, encryptor)
     assert settings.database_url is not None, "database_url must be set"
@@ -107,6 +102,15 @@ async def _process_request(body: dict[str, Any]) -> AgentResponse:
 
     try:
         await conn.connect()
+
+        if not _initialized:
+            from finance_query_agent.observability import initialize
+
+            _initialized = initialize()
+            await conn.verify_rls_enabled(
+                ["accounts", "credit_cards", "account_movements", "credit_card_movements"],
+                strict=settings.aws_lambda_function_name is not None,
+            )
 
         # Load conversation history (DynamoDB always uses string keys)
         history = await memory.load_history(str(raw_user_id), session_id)

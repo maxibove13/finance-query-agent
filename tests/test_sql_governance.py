@@ -9,7 +9,8 @@ from finance_query_agent.sql_governance import validate_select_only
 
 class TestValidSelectOnly:
     def test_simple_select_passes(self) -> None:
-        validate_select_only("SELECT 1 LIMIT 1")
+        # No FROM → scalar, naturally bounded, no LIMIT needed
+        validate_select_only("SELECT 1")
 
     def test_select_with_where_passes(self) -> None:
         validate_select_only("SELECT id, amount FROM account_movements WHERE movement_direction = 'debit' LIMIT 100")
@@ -40,6 +41,35 @@ class TestValidSelectOnly:
             "HAVING SUM(amount) > 100 "
             "LIMIT 100"
         )
+
+    def test_aggregate_without_group_by_passes_without_limit(self) -> None:
+        # SUM() without GROUP BY always returns exactly one row — LIMIT not required
+        validate_select_only("SELECT SUM(amount) FROM account_movements")
+
+    def test_aggregate_with_group_by_requires_limit(self) -> None:
+        # GROUP BY can return many rows — LIMIT required
+        with pytest.raises(ValueError, match="(?i)limit"):
+            validate_select_only("SELECT account_id, SUM(amount) FROM account_movements GROUP BY account_id")
+
+    def test_union_all_passes(self) -> None:
+        validate_select_only(
+            "SELECT amount, 'bank' AS source FROM account_movements WHERE movement_direction = 'debit' "
+            "UNION ALL "
+            "SELECT amount, 'card' AS source FROM credit_card_movements "
+            "LIMIT 100"
+        )
+
+    def test_union_all_without_limit_raises(self) -> None:
+        with pytest.raises(ValueError, match="(?i)limit"):
+            validate_select_only(
+                "SELECT amount FROM account_movements UNION ALL SELECT amount FROM credit_card_movements"
+            )
+
+    def test_set_config_raises(self) -> None:
+        with pytest.raises(ValueError, match="set_config"):
+            validate_select_only(
+                "WITH s AS (SELECT set_config('app.user_id', '2', true)) SELECT * FROM accounts LIMIT 10"
+            )
 
     def test_insert_raises(self) -> None:
         with pytest.raises(ValueError, match="(?i)insert"):
