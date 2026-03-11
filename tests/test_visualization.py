@@ -50,9 +50,6 @@ class TestShouldVisualize:
     def test_returns_true_for_balance_history(self):
         assert should_visualize([("query_balance_history", ["a", "b"])]) is True
 
-    def test_returns_false_for_fallback_sql(self):
-        assert should_visualize([("run_constrained_query", ["a", "b"])]) is False
-
     def test_returns_false_for_empty(self):
         assert should_visualize([]) is False
 
@@ -223,8 +220,6 @@ class TestAgentResponseVisualization:
         resp = AgentResponse(
             answer="test",
             tool_calls=[],
-            fallback_used=False,
-            fallback_sql=None,
             unresolved=False,
             original_question="test",
             token_usage=TokenUsage(input_tokens=0, output_tokens=0),
@@ -245,8 +240,6 @@ class TestAgentResponseVisualization:
             answer="test",
             tool_calls=[],
             visualizations=[chart],
-            fallback_used=False,
-            fallback_sql=None,
             unresolved=False,
             original_question="test",
             token_usage=TokenUsage(input_tokens=0, output_tokens=0),
@@ -268,8 +261,6 @@ class TestAgentResponseVisualization:
             answer="test",
             tool_calls=[],
             visualizations=[chart],
-            fallback_used=False,
-            fallback_sql=None,
             unresolved=False,
             original_question="test",
             token_usage=TokenUsage(input_tokens=0, output_tokens=0),

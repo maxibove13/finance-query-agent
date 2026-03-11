@@ -2,7 +2,7 @@
 
 AI-powered financial query agent. Answers natural language questions about spending, income, and transactions. Deployed as an AWS Lambda invoked by MPI's backend via `boto3 lambda.invoke()`.
 
-Uses a **tools-as-wrappers** architecture: the LLM picks a tool and fills parameters, the service generates and executes parameterized SQL. No raw SQL from the LLM for the common case — a constrained SQL fallback covers the long tail. A secondary **visualization agent** generates chart specs from query results when the data is chartable.
+Uses a **tools-as-wrappers** architecture: the LLM picks a tool and fills parameters, the service generates and executes parameterized SQL. No raw SQL reaches the LLM. A secondary **visualization agent** generates chart specs from query results when the data is chartable.
 
 ```mermaid
 graph LR
@@ -15,7 +15,6 @@ graph LR
             V["query_expenses\nquery_income\nquery_balance_history"]
             D["search_transactions\nget_recurring_expenses"]
         end
-        FB["run_constrained_query\n(SQL fallback)"]
     end
 
     QUERY_AGENT -->|"TextAnswer"| OUT_TEXT["Text Response"]
@@ -33,11 +32,9 @@ graph LR
     D --> QB["QueryBuilder\n(SchemaMapping → SQL)"]
     QB --> PG[("PostgreSQL")]
     MV --> PG
-    FB --> PG
 
     style QUERY_AGENT fill:#2a2a3c,stroke:#88c,color:#fff
     style PREDEFINED fill:#2d5a3d,stroke:#4a9,color:#fff
-    style FB fill:#5a3d2d,stroke:#a94,color:#fff
     style VIZ_AGENT fill:#3a3a5c,stroke:#88c,color:#fff
 ```
 
@@ -94,7 +91,6 @@ graph TB
             HANDLER --> AGENT
             AGENT[Query Agent<br/><i>agent.py</i>]
             AGENT --> TOOLS
-            AGENT --> FALLBACK
 
             subgraph TOOLS["Predefined Tools"]
                 T1[query_expenses]
@@ -104,7 +100,6 @@ graph TB
                 T5[get_recurring_expenses]
             end
 
-            FALLBACK[run_constrained_query<br/><i>SQL fallback</i>]
             QB[QueryBuilder<br/><i>SchemaMapping → SQL</i>]
             T4 --> QB
             T5 --> QB
@@ -121,14 +116,15 @@ graph TB
     LOGFIRE[Logfire<br/><i>PII-scrubbed traces</i>]
 
     QB -->|parameterized queries| RDS
-    FALLBACK -->|validated SQL| RDS
+    T1 -->|parameterized queries| RDS
+    T2 -->|parameterized queries| RDS
+    T3 -->|parameterized queries| RDS
     HANDLER <-->|encrypted history| DDB
     AGENT <-->|inference| LLM_API
     VIZ <-->|inference| LLM_API
     HANDLER -.->|traces| LOGFIRE
 
     style TOOLS fill:#2d5a3d,stroke:#4a9,color:#fff
-    style FALLBACK fill:#5a3d2d,stroke:#a94,color:#fff
     style VIZ fill:#3a3a5c,stroke:#88c,color:#fff
     style RDS fill:#1a3a5c,stroke:#4a9,color:#fff
     style DDB fill:#1a3a5c,stroke:#4a9,color:#fff
@@ -136,14 +132,13 @@ graph TB
 
 ## Tool Architecture
 
-The agent has two tiers of query tools. The LLM always prefers predefined tools — the fallback is a last resort.
+All query tools are predefined — the LLM picks a tool and fills parameters, the service generates parameterized SQL. No raw SQL from the LLM.
 
 ```mermaid
 graph LR
     Q[User Question] --> AGENT[Pydantic AI Agent]
 
-    AGENT -->|"Tier 1 (preferred)"| PREDEFINED
-    AGENT -->|"Tier 2 (fallback)"| CONSTRAINED
+    AGENT --> PREDEFINED
 
     subgraph PREDEFINED["Predefined Tools — Safe by Construction"]
         direction TB
@@ -151,23 +146,11 @@ graph LR
         D["Direct Query<br/>─────────────<br/>search_transactions<br/>get_recurring_expenses"]
     end
 
-    subgraph CONSTRAINED["Constrained SQL — Validated + Sandboxed"]
-        direction TB
-        V1["1. Keyword rejection<br/><i>no INSERT/UPDATE/DELETE/DROP</i>"]
-        V2["2. Table/column allowlist<br/><i>only mapped schema</i>"]
-        V3["3. EXPLAIN validation<br/><i>syntax + reference check</i>"]
-        V4["4. User ID injection<br/><i>strips LLM filters, adds own</i>"]
-        V5["5. LIMIT injection<br/><i>max 200 rows</i>"]
-        V1 --> V2 --> V3 --> V4 --> V5
-    end
-
     V -->|"$1, $2, ..."| DB[(PostgreSQL)]
     D --> QB[QueryBuilder]
     QB -->|"$1, $2, ..."| DB
-    CONSTRAINED -->|"validated SQL"| DB
 
     style PREDEFINED fill:#2d5a3d,stroke:#4a9,color:#fff
-    style CONSTRAINED fill:#5a3d2d,stroke:#a94,color:#fff
 ```
 
 ## Query Generation Pipeline
@@ -252,7 +235,6 @@ graph TB
     subgraph SQLS["SQL Safety"]
         PARAM["Parameterized queries<br/><i>$1, $2 — no interpolation</i>"]
         ALLOW["Table/column allowlist<br/><i>derived from SchemaMapping</i>"]
-        EXPLAIN["EXPLAIN before execute<br/><i>fallback tool only</i>"]
         TIMEOUT["30s query timeout"]
     end
 
@@ -288,7 +270,6 @@ graph LR
     subgraph DERIVES["Service Derives"]
         direction TB
         D1["All predefined tool queries"]
-        D2["Fallback SQL allowlist"]
         D3["User isolation WHERE clauses"]
         D4["UNION ALL for multi-source"]
         D5["Schema validation on startup"]
@@ -297,6 +278,46 @@ graph LR
     style SchemaMapping fill:#3a3a5c,stroke:#88c,color:#fff
     style DERIVES fill:#2d5a3d,stroke:#4a9,color:#fff
 ```
+
+### Schema Config Structure
+
+The schema config is a JSON object provided via `SCHEMA_CONFIG_JSON` (inline), `SCHEMA_CONFIG_PATH` (file), or `SCHEMA_CONFIG_SSM_PARAM` (AWS SSM). In production, MPI's CI/CD manages the SSM parameter.
+
+**Required sections:** `transactions`, `categories`, `accounts`
+
+**Optional sections:** `secondary_transactions` (e.g. credit cards), `unified_expenses`, `unified_income`, `unified_balances`
+
+The unified view mappings are critical — without them, the view-backed tools (`query_expenses`, `query_income`, `query_balance_history`) are **hidden from the LLM** via prepare callbacks. Only `search_transactions` and `get_recurring_expenses` remain available.
+
+Each view mapping requires specific logical keys:
+
+| View | Required keys |
+|------|---------------|
+| `unified_expenses` | `user_id`, `date`, `usd_amount`, `local_amount`, `category`, `merchant` |
+| `unified_income` | `user_id`, `month`, `usd_amount`, `local_amount` |
+| `unified_balances` | `user_id`, `date`, `usd_total`, `local_total` |
+
+Optional key for `unified_balances`: `currency_breakdown` (JSONB per-currency breakdown).
+
+Example view mapping (maps `historical_expenses_mv` materialized view):
+
+```json
+{
+  "unified_expenses": {
+    "table": "historical_expenses_mv",
+    "columns": {
+      "user_id": "user_id",
+      "date": "issued_at",
+      "usd_amount": "usd_amount",
+      "local_amount": "local_amount",
+      "category": "category",
+      "merchant": "description"
+    }
+  }
+}
+```
+
+See `docs/finance-query-agent-spec.md` Section 6 for the full specification, and `localstack/schema-config.json` for a complete working example.
 
 ## Invocation
 
@@ -324,7 +345,6 @@ Response:
       "slices": [{"label": "Groceries", "value": 235.50, "percentage": 42.1}, ...]
     }
   ],
-  "fallback_used": false,
   "unresolved": false,
   "original_question": "How much did I spend on groceries last month?",
   "token_usage": { "input_tokens": 1200, "output_tokens": 85 }
@@ -352,10 +372,8 @@ src/finance_query_agent/
 ├── tools/
 │   ├── unified.py          query_expenses, query_income, query_balance_history (view-backed)
 │   ├── transactions.py     search_transactions
-│   ├── recurring.py        get_recurring_expenses
-│   └── fallback_sql.py     Constrained SQL generation
+│   └── recurring.py        get_recurring_expenses
 ├── validation/
-│   ├── sql_validator.py    Keyword rejection, allowlist, LIMIT injection
 │   └── schema_validator.py Validates mapping against live DB
 └── schemas/
     ├── mapping.py          SchemaMapping, TableMapping, ViewMapping, JoinDef, ColumnRef

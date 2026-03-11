@@ -154,8 +154,6 @@ async def _process_request(body: dict[str, Any]) -> AgentResponse:
                     " Please try rephrasing it or breaking it into simpler parts."
                 ),
                 tool_calls=deps.tool_calls,
-                fallback_used=deps.fallback_used,
-                fallback_sql=deps.fallback_sql,
                 unresolved=True,
                 original_question=question,
                 token_usage=TokenUsage(input_tokens=0, output_tokens=0),
@@ -194,9 +192,7 @@ async def _process_request(body: dict[str, Any]) -> AgentResponse:
             answer=answer_text,
             tool_calls=deps.tool_calls,
             visualizations=visualizations,
-            fallback_used=deps.fallback_used,
-            fallback_sql=deps.fallback_sql,
-            unresolved=not deps.tool_calls and not deps.fallback_used,
+            unresolved=not deps.tool_calls,
             original_question=question,
             token_usage=TokenUsage(
                 input_tokens=usage.input_tokens or 0,

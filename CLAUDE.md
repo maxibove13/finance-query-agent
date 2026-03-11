@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Deployed financial query agent service (Lambda invoked by MPI's backend via boto3) that answers natural language questions about spending, income, and transactions. Uses Pydantic AI as the agent framework with predefined parameterized query tools + a constrained SQL fallback. Owns conversation memory (DynamoDB), observability (Logfire), and PII protection (Fernet encryption + regex scrubbing).
+Deployed financial query agent service (Lambda invoked by MPI's backend via boto3) that answers natural language questions about spending, income, and transactions. Uses Pydantic AI as the agent framework with predefined parameterized query tools. Owns conversation memory (DynamoDB), observability (Logfire), and PII protection (Fernet encryption + regex scrubbing).
 
 **Primary client:** MPI (My Personal Income) — the frontend/app project at `../my_personal_incomes_ai`.
 
@@ -61,8 +61,7 @@ Browser -> MPI API Gateway -> MPI Lambda -> boto3 invoke -> Agent Lambda
 | Logfire + scrubbing callback | `src/finance_query_agent/observability.py` |
 | View-backed tools (expenses, income, balances) | `src/finance_query_agent/tools/unified.py` |
 | Direct query tools (transactions, recurring) | `src/finance_query_agent/tools/transactions.py`, `recurring.py` |
-| Constrained SQL fallback | `src/finance_query_agent/tools/fallback_sql.py` |
-| SQL & schema validation | `src/finance_query_agent/validation/` |
+| Schema validation | `src/finance_query_agent/validation/` |
 | Pydantic models (mapping, results, responses) | `src/finance_query_agent/schemas/` |
 | Exception hierarchy | `src/finance_query_agent/exceptions.py` |
 | Terraform module | `terraform/` |
@@ -71,11 +70,11 @@ Browser -> MPI API Gateway -> MPI Lambda -> boto3 invoke -> Agent Lambda
 ## Key Design Decisions
 
 - **Service, not SDK:** Lambda invoked by MPI's backend via `boto3 lambda.invoke()` (30s timeout). Synchronous request-response.
-- **Tools-as-wrappers:** The LLM picks a tool and fills params; the service generates and executes parameterized SQL. No raw SQL from the LLM for the common case.
+- **Tools-as-wrappers:** The LLM picks a tool and fills params; the service generates and executes parameterized SQL. No raw SQL from the LLM.
 - **Schema mapping:** Declarative `SchemaMapping` config with optional `ViewMapping` for materialized views. View-backed tools query pre-computed views; direct query tools use `QueryBuilder`.
 - **Multi-currency:** View-backed tools support `currency` param (`usd`/`local`) for pre-converted amounts. Direct query tools return raw per-transaction currency.
 - **User isolation:** Every query scoped to `user_id`. Injected by the service, never by the LLM.
-- **Read-only:** No write operations. Enforced at DB role level (security boundary) + keyword rejection (defense-in-depth).
+- **Read-only:** No write operations. Enforced at DB role level (security boundary).
 - **PII protection:** Two layers — Fernet encryption at rest (DynamoDB), regex scrubbing in traces (Logfire). No NER models.
 - **Single connection:** One `asyncpg.connect()` per invocation (no pool). Matches Lambda's single-request model.
 
@@ -99,7 +98,6 @@ Include `[MPI-<NUMBER>]` in the PR title and `Closes MPI-<NUMBER>` in the PR bod
 
 - `asyncpg` uses `$1` style parameters, not `%s` or `?`.
 - `SchemaMapping` validation happens on cold start against the live DB.
-- The fallback SQL tool has stricter constraints (no CTEs, no subqueries) than the predefined tools.
 - `AmountConvention` determines expense vs income filtering — every spending tool depends on it.
 - `AWS_LAMBDA_FUNCTION_NAME` env var is used for Lambda detection (prod vs dev behavior).
 - DynamoDB `user_id` must be a separate top-level attribute, not extracted from composite PK.
