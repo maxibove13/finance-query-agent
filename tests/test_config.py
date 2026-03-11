@@ -22,7 +22,8 @@ class TestLoadFromEnv:
 
     def test_defaults(self) -> None:
         s = Settings()
-        assert s.query_model == "openai:gpt-4o"
+        assert s.primary_model == "openai:gpt-4.1"
+        assert s.secondary_model == "openai:gpt-4.1-mini"
         assert s.dynamodb_table == "finance_agent_conversations"
         assert s.dynamodb_region == "us-east-1"
         assert s.database_url is None

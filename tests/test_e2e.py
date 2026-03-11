@@ -46,7 +46,7 @@ def _env(postgres_url: str, sample_schema_mapping: SchemaMapping):
     env = {
         "DATABASE_URL": postgres_url,
         "SCHEMA_CONFIG_JSON": schema_json,
-        "QUERY_MODEL": "openai:gpt-4o-mini",
+        "PRIMARY_MODEL": "openai:gpt-4.1-mini",
         "DYNAMODB_TABLE": "test-conversations",
         "DYNAMODB_REGION": "us-east-1",
     }

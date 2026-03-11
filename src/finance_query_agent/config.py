@@ -16,8 +16,8 @@ logger = logging.getLogger(__name__)
 
 class Settings(BaseSettings):
     database_url: str | None = None  # asyncpg: postgresql://... (resolved from secret in Lambda)
-    query_model: str = "openai:gpt-4o"
-    viz_model: str = "openai:gpt-4o-mini"
+    primary_model: str = "openai:gpt-4.1"
+    secondary_model: str = "openai:gpt-4.1-mini"
     dynamodb_table: str = "finance_agent_conversations"
     dynamodb_region: str = "us-east-1"
     schema_config_json: str | None = None  # inline JSON

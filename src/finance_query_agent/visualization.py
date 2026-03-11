@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from pydantic_ai import Agent
 
-from finance_query_agent.schemas.charts import ChartSpec
+from finance_query_agent.schemas.charts import (
+    BarChartSpec,
+    ChartSpec,
+    GroupedBarChartSpec,
+    LineChartSpec,
+    PieChartSpec,
+    PieSlice,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +29,7 @@ the structured data returned by query tools, produce chart specifications.
 
 ### pie
 Category proportions (spending by category, breakdowns).
-- slices: list of {label, value, percentage (0-100)}
+- slices: list of {label, value}
 - Good for: query_expenses (group_by=category)
 
 ### bar
@@ -44,8 +51,7 @@ Side-by-side period comparison.
 ## Rules
 
 1. Produce ONE chart per currency. If data spans USD and UYU, return two charts.
-2. For pie charts: max 8 slices. If more categories exist, combine the smallest into "Other". \
-Percentages must sum to ~100.
+2. For pie charts: max 8 slices. If more categories exist, combine the smallest into "Other".
 3. Title should be short and descriptive (e.g., "Spending by Category (USD)").
 4. Return an EMPTY charts list if:
    - The data has only 1 row (a chart adds no value over the text answer)
@@ -55,22 +61,57 @@ Percentages must sum to ~100.
 """
 
 
-class VisualizationOutput(BaseModel):
-    """Structured output of the visualization agent."""
-
-    charts: list[ChartSpec]
-
-
-_viz_agents: dict[str, Agent[None, VisualizationOutput]] = {}
+# ---------------------------------------------------------------------------
+# LLM-only schemas — what the agent outputs. PieSlice has no `percentage`
+# field so the LLM is never asked to compute it.
+# ---------------------------------------------------------------------------
 
 
-def _get_viz_agent(model: str) -> Agent[None, VisualizationOutput]:
+class _PieSliceLLM(BaseModel):
+    label: str
+    value: float
+
+
+class _PieChartSpecLLM(BaseModel):
+    chart_type: Literal["pie"] = "pie"
+    title: str
+    currency: str
+    slices: list[_PieSliceLLM]
+
+
+_ChartSpecLLM = Annotated[
+    _PieChartSpecLLM | BarChartSpec | LineChartSpec | GroupedBarChartSpec,
+    Field(discriminator="chart_type"),
+]
+
+
+class _VisualizationOutputLLM(BaseModel):
+    charts: list[_ChartSpecLLM]
+
+
+def _to_chart_spec(llm_chart: _PieChartSpecLLM | BarChartSpec | LineChartSpec | GroupedBarChartSpec) -> ChartSpec:
+    """Convert LLM output to the public ChartSpec, computing pie percentages from values."""
+    if isinstance(llm_chart, _PieChartSpecLLM):
+        return PieChartSpec(
+            title=llm_chart.title,
+            currency=llm_chart.currency,
+            slices=[PieSlice(label=s.label, value=s.value) for s in llm_chart.slices],
+        )
+    return llm_chart
+
+
+# ---------------------------------------------------------------------------
+
+_viz_agents: dict[str, Agent[None, _VisualizationOutputLLM]] = {}
+
+
+def _get_viz_agent(model: str) -> Agent[None, _VisualizationOutputLLM]:
     if model in _viz_agents:
         return _viz_agents[model]
 
-    agent: Agent[None, VisualizationOutput] = Agent(
+    agent: Agent[None, _VisualizationOutputLLM] = Agent(
         model,
-        output_type=VisualizationOutput,
+        output_type=_VisualizationOutputLLM,
         system_prompt=_SYSTEM_PROMPT,
     )
     _viz_agents[model] = agent
@@ -114,7 +155,7 @@ def _serialize_tool_results(tool_results: list[tuple[str, Any]]) -> str:
 async def generate_visualizations(
     question: str,
     tool_results: list[tuple[str, Any]],
-    model: str = "openai:gpt-4o-mini",
+    model: str = "openai:gpt-4.1-mini",
 ) -> list[ChartSpec] | None:
     """Run the visualization agent and return chart specs, or None."""
     if not should_visualize(tool_results):
@@ -129,7 +170,7 @@ async def generate_visualizations(
     try:
         agent = _get_viz_agent(model)
         result = await agent.run(prompt)
-        charts = result.output.charts
+        charts = [_to_chart_spec(c) for c in result.output.charts]
         return charts if charts else None
     except Exception:
         logger.exception("Visualization agent failed")
