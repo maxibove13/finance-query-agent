@@ -109,3 +109,28 @@ class TestValidSelectOnly:
 
     def test_select_with_limit_passes(self) -> None:
         validate_select_only("SELECT * FROM account_movements LIMIT 100")
+
+    def test_select_with_max_limit_passes(self) -> None:
+        validate_select_only("SELECT * FROM account_movements LIMIT 200")
+
+    def test_select_exceeding_max_limit_raises(self) -> None:
+        with pytest.raises(ValueError, match="200"):
+            validate_select_only("SELECT * FROM account_movements LIMIT 201")
+
+    def test_union_exceeding_max_limit_raises(self) -> None:
+        with pytest.raises(ValueError, match="200"):
+            validate_select_only(
+                "SELECT id FROM account_movements UNION ALL SELECT id FROM credit_card_movements LIMIT 201"
+            )
+
+    def test_limit_all_raises(self) -> None:
+        with pytest.raises(ValueError, match="plain integer"):
+            validate_select_only("SELECT * FROM account_movements LIMIT ALL")
+
+    def test_limit_expression_raises(self) -> None:
+        with pytest.raises(ValueError, match="plain integer"):
+            validate_select_only("SELECT * FROM account_movements LIMIT 200 + 1")
+
+    def test_limit_cast_raises(self) -> None:
+        with pytest.raises(ValueError, match="plain integer"):
+            validate_select_only("SELECT * FROM account_movements LIMIT CAST(10 AS INT)")

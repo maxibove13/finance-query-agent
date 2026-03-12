@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -107,3 +107,21 @@ async def test_user2_isolation(db_connection) -> None:
 
     assert "Other User Groceries" in descriptions
     assert "Whole Foods" not in descriptions
+
+
+@pytest.mark.asyncio
+async def test_logfire_span_emitted(db_connection) -> None:
+    deps = AgentDeps(connection=db_connection, user_id=1)
+    ctx = _make_ctx(deps)
+
+    with patch("finance_query_agent.tools.sql.logfire") as mock_logfire:
+        await execute_sql(ctx, "SELECT id FROM accounts ORDER BY id LIMIT 1")
+
+    mock_logfire.info.assert_called_once()
+    call_args = mock_logfire.info.call_args
+    assert call_args[0][0] == "sql_query"
+    kwargs = call_args[1]
+    assert len(kwargs["sql_hash"]) == 16
+    assert kwargs["row_count"] == 1
+    assert kwargs["empty_result"] is False
+    assert kwargs["execution_time_ms"] >= 0

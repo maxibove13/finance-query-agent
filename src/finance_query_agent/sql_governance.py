@@ -56,18 +56,35 @@ def _walk_and_check(statement: exp.Expression) -> None:
             raise ValueError("set_config() is not allowed in queries")
 
 
+_MAX_ROWS = 200
+
+
 def _check_limit(statement: exp.Expression) -> None:
-    """Require LIMIT when the query can return a variable number of rows."""
+    """Require LIMIT <= _MAX_ROWS when the query can return a variable number of rows."""
     if isinstance(statement, exp.Union):
         # UNION combines multiple selects — LIMIT applies to the combined result
-        if statement.args.get("limit") is None:
+        limit_expr = statement.args.get("limit")
+        if limit_expr is None:
             raise ValueError("Query must include a LIMIT clause")
+        _check_limit_value(limit_expr)
         return
     assert isinstance(statement, exp.Select)
     if _is_naturally_bounded(statement):
         return
-    if statement.args.get("limit") is None:
+    limit_expr = statement.args.get("limit")
+    if limit_expr is None:
         raise ValueError("Query must include a LIMIT clause")
+    _check_limit_value(limit_expr)
+
+
+def _check_limit_value(limit_expr: exp.Expression) -> None:
+    literal = limit_expr.expression
+    if not isinstance(literal, exp.Literal) or literal.is_string:
+        raise ValueError(
+            f"LIMIT must be a plain integer of {_MAX_ROWS} or less; expressions and LIMIT ALL are not allowed"
+        )
+    if int(literal.this) > _MAX_ROWS:
+        raise ValueError(f"LIMIT must be {_MAX_ROWS} or less")
 
 
 def _is_naturally_bounded(select: exp.Select) -> bool:

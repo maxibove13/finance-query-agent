@@ -140,6 +140,22 @@ async def _process_request(body: dict[str, Any]) -> AgentResponse:
             )
         except (TimeoutError, UsageLimitExceeded) as exc:
             logger.warning("Agent execution capped: %s", exc)
+            if settings.audit_table:
+                try:
+                    from finance_query_agent.audit import SqlAudit
+
+                    audit = SqlAudit(settings.audit_table, settings.dynamodb_region)
+                    await audit.write_invocation(
+                        user_id=str(user_id),
+                        session_id=session_id,
+                        question=question,
+                        tool_calls=deps.tool_calls,
+                        token_usage=TokenUsage(input_tokens=0, output_tokens=0),
+                        total_ms=int((time.monotonic() - request_start) * 1000),
+                        unresolved=True,
+                    )
+                except Exception:
+                    logger.warning("Audit write failed", exc_info=True)
             return AgentResponse(
                 answer=(
                     "I wasn't able to fully process your question within the time limit."
@@ -153,6 +169,28 @@ async def _process_request(body: dict[str, Any]) -> AgentResponse:
 
         # Store updated conversation (DynamoDB always uses string keys)
         await memory.save_history(str(raw_user_id), session_id, result.all_messages())
+
+        usage = result.usage()
+
+        if settings.audit_table:
+            try:
+                from finance_query_agent.audit import SqlAudit
+
+                audit = SqlAudit(settings.audit_table, settings.dynamodb_region)
+                await audit.write_invocation(
+                    user_id=str(user_id),
+                    session_id=session_id,
+                    question=question,
+                    tool_calls=deps.tool_calls,
+                    token_usage=TokenUsage(
+                        input_tokens=usage.input_tokens or 0,
+                        output_tokens=usage.output_tokens or 0,
+                    ),
+                    total_ms=int((time.monotonic() - request_start) * 1000),
+                    unresolved=not deps.tool_calls,
+                )
+            except Exception:
+                logger.warning("Audit write failed", exc_info=True)
 
         # Agent-decided visualization with programmatic guardrails
         from finance_query_agent.schemas.responses import AnswerWithVisualization
@@ -179,7 +217,6 @@ async def _process_request(body: dict[str, Any]) -> AgentResponse:
                     logger.warning("Visualization timed out (budget=%.1fs)", viz_budget)
 
         # Build response
-        usage = result.usage()
         return AgentResponse(
             answer=answer_text,
             tool_calls=deps.tool_calls,

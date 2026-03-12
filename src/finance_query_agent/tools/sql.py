@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import datetime
 import decimal
+import hashlib
 import time
 from typing import Any
 
+import logfire
 from pydantic_ai import RunContext
 
 from finance_query_agent.schemas.responses import ToolCallRecord
@@ -51,5 +53,13 @@ async def execute_sql(ctx: RunContext[AgentDeps], sql: str) -> list[dict[str, An
         )
     )
     ctx.deps.tool_results.append(("execute_sql", result))
+
+    logfire.info(
+        "sql_query",
+        sql_hash=hashlib.sha256(sql.encode()).hexdigest()[:16],
+        row_count=len(result),
+        empty_result=len(result) == 0,
+        execution_time_ms=elapsed_ms,
+    )
 
     return result

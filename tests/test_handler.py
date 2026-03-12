@@ -78,6 +78,7 @@ def _build_mocks() -> dict:
     settings.max_question_length = 2000
     settings.max_session_id_length = 128
     settings.aws_lambda_function_name = None
+    settings.audit_table = None
 
     targets = {
         "finance_query_agent.observability.initialize": MagicMock(),
@@ -298,6 +299,60 @@ class TestProcessRequest:
         assert resp.answer == "Here's your breakdown"
         assert resp.visualizations is not None
         assert len(resp.visualizations) == 1
+
+    @pytest.mark.asyncio()
+    async def test_audit_called_on_usage_limit_exceeded(self, mocks: dict) -> None:
+        mocks["settings"].audit_table = "test-audit"
+        mocks["agent"].run = AsyncMock(side_effect=UsageLimitExceeded("request_limit of 7 exceeded"))
+        audit_mock = AsyncMock()
+
+        with ExitStack() as stack:
+            _apply(stack, mocks["targets"])
+            stack.enter_context(patch("finance_query_agent.audit.SqlAudit", return_value=audit_mock))
+            resp = await _process_request(_BODY)
+
+        assert resp.unresolved is True
+        audit_mock.write_invocation.assert_awaited_once()
+        call_kwargs = audit_mock.write_invocation.call_args.kwargs
+        assert call_kwargs["unresolved"] is True
+        assert call_kwargs["token_usage"].input_tokens == 0
+
+    @pytest.mark.asyncio()
+    async def test_audit_write_called_when_enabled(self, mocks: dict) -> None:
+        mocks["settings"].audit_table = "test-audit"
+        audit_mock = AsyncMock()
+
+        with ExitStack() as stack:
+            _apply(stack, mocks["targets"])
+            stack.enter_context(patch("finance_query_agent.audit.SqlAudit", return_value=audit_mock))
+            await _process_request(_BODY)
+
+        audit_mock.write_invocation.assert_awaited_once()
+
+    @pytest.mark.asyncio()
+    async def test_audit_not_called_when_disabled(self, mocks: dict) -> None:
+        mocks["settings"].audit_table = None
+        audit_mock = AsyncMock()
+
+        with ExitStack() as stack:
+            _apply(stack, mocks["targets"])
+            audit_cls = stack.enter_context(patch("finance_query_agent.audit.SqlAudit", return_value=audit_mock))
+            await _process_request(_BODY)
+
+        audit_cls.assert_not_called()
+
+    @pytest.mark.asyncio()
+    async def test_audit_failure_does_not_fail_request(self, mocks: dict) -> None:
+        mocks["settings"].audit_table = "test-audit"
+        audit_mock = AsyncMock()
+        audit_mock.write_invocation.side_effect = Exception("DynamoDB unreachable")
+
+        with ExitStack() as stack:
+            _apply(stack, mocks["targets"])
+            stack.enter_context(patch("finance_query_agent.audit.SqlAudit", return_value=audit_mock))
+            resp = await _process_request(_BODY)
+
+        assert resp.answer == "The answer is 42"
 
     @pytest.mark.asyncio()
     async def test_answer_with_viz_skips_when_guardrails_fail(self, mocks: dict) -> None:

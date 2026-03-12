@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     secondary_model: str = "openai:gpt-4.1-mini"
     dynamodb_table: str = "finance_agent_conversations"
     dynamodb_region: str = "us-east-1"
+    audit_table: str | None = None  # None = audit disabled
     encryption_key: str | None = None  # Fernet key (required in prod)
     logfire_token: str | None = None
     aws_lambda_function_name: str | None = None  # auto-set by Lambda
