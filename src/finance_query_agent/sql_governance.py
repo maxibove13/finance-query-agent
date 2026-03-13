@@ -5,28 +5,30 @@ from __future__ import annotations
 import sqlglot
 import sqlglot.expressions as exp
 
+# All read-only set-operation root types
+_SELECT_ROOTS = (exp.Select, exp.Union, exp.Intersect, exp.Except)
+
 
 def validate_select_only(sql: str) -> None:
     """Parse sql and raise ValueError if it is not a read-only SELECT statement.
 
-    Accepts plain SELECT and UNION ALL / UNION / INTERSECT / EXCEPT of SELECTs.
+    Accepts plain SELECT and UNION / INTERSECT / EXCEPT of SELECTs.
     Rejects:
     - Non-SELECT root statements (INSERT, UPDATE, DELETE, DDL, etc.)
     - Write statements embedded in CTEs
+    - SELECT INTO (writes results to a new table)
     - CROSS JOINs
     - set_config() calls (can bypass RLS by rewriting session GUCs)
-    - Missing LIMIT when the query returns a variable number of rows
     """
     try:
         statement = sqlglot.parse_one(sql, dialect="postgres")
     except sqlglot.errors.ParseError as exc:
         raise ValueError(f"Invalid SQL: {exc}") from exc
 
-    if not isinstance(statement, (exp.Select, exp.Union)):
+    if not isinstance(statement, _SELECT_ROOTS):
         raise ValueError(f"Only SELECT statements are allowed; got {type(statement).__name__}")
 
     _walk_and_check(statement)
-    _check_limit(statement)
 
 
 _FORBIDDEN = (
@@ -38,6 +40,7 @@ _FORBIDDEN = (
     exp.TruncateTable,
     exp.Alter,
     exp.Command,
+    exp.Into,  # SELECT ... INTO new_table
 )
 
 
@@ -59,32 +62,34 @@ def _walk_and_check(statement: exp.Expression) -> None:
 _MAX_ROWS = 200
 
 
-def _check_limit(statement: exp.Expression) -> None:
-    """Require LIMIT <= _MAX_ROWS when the query can return a variable number of rows."""
-    if isinstance(statement, exp.Union):
-        # UNION combines multiple selects — LIMIT applies to the combined result
-        limit_expr = statement.args.get("limit")
-        if limit_expr is None:
-            raise ValueError("Query must include a LIMIT clause")
-        _check_limit_value(limit_expr)
-        return
-    assert isinstance(statement, exp.Select)
-    if _is_naturally_bounded(statement):
-        return
+def cap_limit(sql: str, max_rows: int = _MAX_ROWS) -> str:
+    """Rewrite sql to ensure LIMIT <= max_rows.
+
+    - No LIMIT → appends LIMIT max_rows
+    - LIMIT > max_rows (or non-literal LIMIT) → replaces with max_rows
+    - Naturally bounded queries (scalar SELECT, ungrouped aggregate) → unchanged
+    """
+    statement = sqlglot.parse_one(sql, dialect="postgres")
+    if isinstance(statement, exp.Select) and not _is_naturally_bounded(statement):
+        _apply_cap(statement, max_rows)
+    elif isinstance(statement, (exp.Union, exp.Intersect, exp.Except)):
+        _apply_cap(statement, max_rows)
+    return statement.sql(dialect="postgres")
+
+
+def _apply_cap(statement: exp.Expression, max_rows: int) -> None:
     limit_expr = statement.args.get("limit")
-    if limit_expr is None:
-        raise ValueError("Query must include a LIMIT clause")
-    _check_limit_value(limit_expr)
-
-
-def _check_limit_value(limit_expr: exp.Expression) -> None:
-    literal = limit_expr.expression
-    if not isinstance(literal, exp.Literal) or literal.is_string:
-        raise ValueError(
-            f"LIMIT must be a plain integer of {_MAX_ROWS} or less; expressions and LIMIT ALL are not allowed"
-        )
-    if int(literal.this) > _MAX_ROWS:
-        raise ValueError(f"LIMIT must be {_MAX_ROWS} or less")
+    if limit_expr is not None:
+        # Fetch nodes (FETCH FIRST n ROWS ONLY) store the count in .args['count'],
+        # not in .expression like standard LIMIT nodes do.
+        if isinstance(limit_expr, exp.Fetch):
+            literal = limit_expr.args.get("count")
+        else:
+            literal = limit_expr.expression
+        if isinstance(literal, exp.Literal) and not literal.is_string:
+            if int(literal.this) <= max_rows:
+                return  # already within bounds
+    statement.set("limit", exp.Limit(expression=exp.Literal.number(max_rows)))
 
 
 def _is_naturally_bounded(select: exp.Select) -> bool:
@@ -93,7 +98,11 @@ def _is_naturally_bounded(select: exp.Select) -> bool:
     # sqlglot uses "from_" (trailing underscore) because "from" is a Python keyword.
     if not select.args.get("from_"):
         return True
-    # Aggregate without GROUP BY → always returns exactly one row
-    if not select.args.get("group") and any(isinstance(n, exp.AggFunc) for n in select.walk()):
+    # Aggregate without GROUP BY → always returns exactly one row.
+    # Walk only the outer SELECT list, not the full AST — a subquery in WHERE/HAVING
+    # (e.g. WHERE x > (SELECT AVG(x) FROM t)) would otherwise trigger a false positive.
+    if not select.args.get("group") and any(
+        isinstance(n, exp.AggFunc) for expr in select.expressions for n in expr.walk()
+    ):
         return True
     return False

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from pydantic_ai import ModelRetry
 
+from finance_query_agent.exceptions import DatabaseConnectionError
 from finance_query_agent.tools import AgentDeps
 from finance_query_agent.tools.sql import execute_sql
 
@@ -31,15 +33,55 @@ async def test_select_returns_list_of_dicts(db_connection) -> None:
 
 
 @pytest.mark.asyncio
-async def test_write_statement_raises_before_hitting_db(db_connection) -> None:
+async def test_write_statement_raises_model_retry_before_hitting_db(db_connection) -> None:
     deps = AgentDeps(connection=db_connection, user_id=1)
     ctx = _make_ctx(deps)
 
-    with pytest.raises(ValueError, match="(?i)insert"):
+    with pytest.raises(ModelRetry, match="(?i)insert"):
         await execute_sql(ctx, "INSERT INTO accounts (user_id, currency) VALUES (1, 'USD')")
 
     # No tool call should have been recorded
     assert len(deps.tool_calls) == 0
+
+
+@pytest.mark.asyncio
+async def test_db_error_after_explain_retries() -> None:
+    conn = MagicMock()
+    conn.explain = AsyncMock(return_value=None)
+    conn.execute_governed = AsyncMock(side_effect=DatabaseConnectionError("column foo does not exist"))
+    deps = AgentDeps(connection=conn, user_id=1)
+    ctx = _make_ctx(deps)
+
+    with pytest.raises(ModelRetry, match="column foo"):
+        await execute_sql(ctx, "SELECT foo FROM accounts LIMIT 10")
+
+
+@pytest.mark.asyncio
+async def test_explain_called_before_execution() -> None:
+    conn = MagicMock()
+    conn.explain = AsyncMock(return_value=None)
+    conn.execute_governed = AsyncMock(return_value=[])
+    deps = AgentDeps(connection=conn, user_id=1)
+    ctx = _make_ctx(deps)
+
+    await execute_sql(ctx, "SELECT id FROM accounts LIMIT 10")
+
+    conn.explain.assert_awaited_once_with("SELECT id FROM accounts LIMIT 10", 1)
+    conn.execute_governed.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_explain_failure_raises_model_retry() -> None:
+    conn = MagicMock()
+    conn.explain = AsyncMock(side_effect=DatabaseConnectionError("column bar does not exist"))
+    conn.execute_governed = AsyncMock(return_value=[])
+    deps = AgentDeps(connection=conn, user_id=1)
+    ctx = _make_ctx(deps)
+
+    with pytest.raises(ModelRetry, match="column bar"):
+        await execute_sql(ctx, "SELECT bar FROM accounts LIMIT 10")
+
+    conn.execute_governed.assert_not_awaited()
 
 
 @pytest.mark.asyncio

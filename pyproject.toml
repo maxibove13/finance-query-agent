@@ -33,6 +33,7 @@ dev-dependencies = [
     "diff-cover>=9.0",
     "testcontainers[postgres]>=4.0",
     "moto[dynamodb]>=5.0",
+    "types-pyyaml>=6.0.12.20250915",
 ]
 
 [tool.hatch.build.targets.wheel]

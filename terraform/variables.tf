@@ -14,14 +14,6 @@ variable "secondary_model" {
   default = "openai:gpt-4.1-mini"
 }
 
-# Schema
-variable "schema_config_json" {
-  type        = string
-  sensitive   = true
-  description = "SchemaMapping JSON — seeds SSM parameter on first apply, ignored after"
-  default     = "{}"
-}
-
 # Lambda
 variable "memory_size" {
   type    = number

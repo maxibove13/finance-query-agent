@@ -3,16 +3,14 @@
 from __future__ import annotations
 
 import datetime
-from pathlib import Path
 
 from pydantic_ai import Agent, RunContext, ToolOutput
 from pydantic_ai.models import Model
 
 from finance_query_agent.history import summarize_history
+from finance_query_agent.schema_builder import get_schema_context
 from finance_query_agent.schemas.responses import AgentOutput, AnswerWithVisualization, TextAnswer
 from finance_query_agent.tools import AgentDeps
-
-_SCHEMA_YAML = (Path(__file__).parent / "schema.yaml").read_text()
 
 _agents: dict[str, Agent[AgentDeps, AgentOutput]] = {}
 
@@ -50,13 +48,14 @@ def get_agent(model: str | Model) -> Agent[AgentDeps, AgentOutput]:
 
     @agent.system_prompt(dynamic=True)
     async def system_prompt(ctx: RunContext[AgentDeps]) -> str:
-        return build_system_prompt()
+        schema = await get_schema_context(ctx.deps.connection)
+        return build_system_prompt(schema)
 
     _agents[key] = agent
     return agent
 
 
-def build_system_prompt() -> str:
+def build_system_prompt(schema: str) -> str:
     """Build system prompt with fresh date. Called on every agent.run()."""
     today = datetime.date.today().isoformat()
     return f"""You are a financial data assistant. Today's date is {today}.
@@ -65,7 +64,7 @@ Respond in the same language the user writes in.
 
 ## Database Schema
 
-{_SCHEMA_YAML}
+{schema}
 
 ## Query guidance
 

@@ -121,6 +121,18 @@ class Connection:
             if strict:
                 raise DatabaseConnectionError(msg)
 
+    async def explain(self, sql: str, user_id: Any) -> None:
+        """Run EXPLAIN to validate sql without reading data. Raises DatabaseConnectionError on invalid SQL."""
+        try:
+            async with self._get_pool().acquire() as conn:
+                async with conn.transaction(readonly=True):
+                    await conn.execute("SELECT set_config('app.user_id', $1, true)", str(user_id))
+                    await conn.execute(f"EXPLAIN {sql}")
+        except asyncpg.QueryCanceledError as exc:
+            raise QueryTimeoutError(str(exc)) from exc
+        except asyncpg.PostgresError as exc:
+            raise DatabaseConnectionError(str(exc)) from exc
+
     async def execute_governed(self, sql: str, user_id: Any) -> list[Any]:
         """Run sql in a readonly transaction with app.user_id set for RLS."""
         try:

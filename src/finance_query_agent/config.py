@@ -6,6 +6,7 @@ import json
 import logging
 import os
 from functools import lru_cache
+from urllib.parse import quote_plus
 
 from pydantic_settings import BaseSettings
 
@@ -38,6 +39,7 @@ class Settings(BaseSettings):
     encryption_key_secret_arn: str | None = None
     llm_api_key_secret_arn: str | None = None
     logfire_token_secret_arn: str | None = None
+    semantic_model_ssm_path: str = "/mpi/finance-agent/semantic-model"
 
     def resolve_secrets(self) -> None:
         """Fetch secrets from AWS Secrets Manager."""
@@ -54,7 +56,7 @@ class Settings(BaseSettings):
                 raw = _resolve_secret(self.db_credentials_secret_arn)
                 creds = json.loads(raw)
                 self.database_url = (
-                    f"postgresql://{creds['username']}:{creds['password']}"
+                    f"postgresql://{quote_plus(creds['username'])}:{quote_plus(creds['password'])}"
                     f"@{creds['host']}:{creds.get('port', 5432)}/{creds['dbname']}"
                 )
 

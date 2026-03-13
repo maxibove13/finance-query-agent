@@ -1,3 +1,29 @@
+resource "aws_dynamodb_table" "audit" {
+  name         = "${var.project_name}-audit"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "PK"
+  range_key    = "SK"
+
+  attribute {
+    name = "PK"
+    type = "S"
+  }
+
+  attribute {
+    name = "SK"
+    type = "S"
+  }
+
+  ttl {
+    attribute_name = "ttl"
+    enabled        = true
+  }
+
+  tags = {
+    Project = var.project_name
+  }
+}
+
 resource "aws_dynamodb_table" "conversations" {
   name         = "${var.project_name}-conversations"
   billing_mode = "PAY_PER_REQUEST"

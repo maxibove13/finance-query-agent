@@ -39,7 +39,7 @@ aws lambda update-function-configuration \
   --description "schema config updated $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 ```
 
-If the new schema config doesn't match the live database, the Lambda returns `503 schema_mismatch` -- the client should treat this as a non-retryable config error.
+If the new schema config is invalid or doesn't match the live database, the Lambda will log a critical error on the first request after the cold start and return an error response. Monitor CloudWatch for `CRITICAL` log entries after schema updates.
 
 ## Secrets
 
@@ -58,18 +58,18 @@ Terraform outputs for MPI's integration:
 - `lambda_function_name` -- for `boto3.client('lambda').invoke(FunctionName=...)`
 - `lambda_function_arn` -- for IAM permissions (`lambda:InvokeFunction`)
 
-The caller wraps the payload in `event["body"]`:
+The caller sends the payload as a flat JSON object (no `event["body"]` wrapping). `user_id` must be a positive integer:
 
 ```python
 import json
 import boto3
 
 lambda_client = boto3.client("lambda")
-payload = {"user_id": "user-123", "session_id": "session-abc", "question": "..."}
+payload = {"user_id": 123, "session_id": "session-abc", "question": "..."}
 response = lambda_client.invoke(
     FunctionName="finance-query-agent",
-    Payload=json.dumps({"body": json.dumps(payload)}),
+    Payload=json.dumps(payload),
 )
 result = json.loads(response["Payload"].read())
-answer = json.loads(result["body"])
+# result is the AgentResponse dict directly (answer, tool_calls, unresolved, etc.)
 ```

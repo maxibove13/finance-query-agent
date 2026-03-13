@@ -11,36 +11,40 @@ from finance_query_agent.agent import build_system_prompt, get_agent
 
 _TEST_MODEL = TestModel()
 
+_FAKE_SCHEMA = (
+    "tables:\n  account_movements:\n  accounts:\n  credit_card_movements:\ncolumns:\n  movement_direction: text"
+)
+
 
 class TestBuildSystemPrompt:
     def test_includes_current_date(self) -> None:
-        prompt = build_system_prompt()
+        prompt = build_system_prompt(_FAKE_SCHEMA)
         assert datetime.date.today().isoformat() in prompt
 
     def test_includes_schema_tables(self) -> None:
-        prompt = build_system_prompt()
+        prompt = build_system_prompt(_FAKE_SCHEMA)
         assert "account_movements" in prompt
         assert "accounts" in prompt
         assert "credit_card_movements" in prompt
         assert "movement_direction" in prompt
 
     def test_includes_amount_convention(self) -> None:
-        prompt = build_system_prompt()
+        prompt = build_system_prompt(_FAKE_SCHEMA)
         assert "debit" in prompt
         assert "credit" in prompt
 
     def test_includes_visualization_guidance(self) -> None:
-        prompt = build_system_prompt()
+        prompt = build_system_prompt(_FAKE_SCHEMA)
         assert "final_answer_with_chart" in prompt
         assert "final_answer" in prompt
         assert "visualization agent" in prompt
 
     def test_includes_language_mirroring(self) -> None:
-        prompt = build_system_prompt()
+        prompt = build_system_prompt(_FAKE_SCHEMA)
         assert "same language" in prompt
 
     def test_no_old_tool_references(self) -> None:
-        prompt = build_system_prompt()
+        prompt = build_system_prompt(_FAKE_SCHEMA)
         for deleted in (
             "query_expenses",
             "query_income",

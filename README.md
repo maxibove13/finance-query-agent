@@ -22,7 +22,7 @@ graph LR
 
     VIZ_AGENT --> OUT_VIZ["Text + Chart Specs"]
 
-    T1 --> GOV["SQL Governance<br/>(validate_select_only)"]
+    T1 --> GOV["SQL Governance<br/>(validate + cap_limit + EXPLAIN)"]
     GOV --> PG[("PostgreSQL")]
 
     style QUERY_AGENT fill:#2a2a3c,stroke:#88c,color:#fff
@@ -115,7 +115,7 @@ graph TB
 
 ## Tool Architecture
 
-The agent has one tool: `execute_sql`. The LLM writes a SELECT query against the schema documented in `schema.yaml`; governance validates it before execution.
+The agent has one tool: `execute_sql`. The LLM writes a SELECT query against the schema injected into the system prompt; governance validates it before execution.
 
 ```mermaid
 graph LR
@@ -128,8 +128,8 @@ graph LR
     subgraph GOV["SQL Governance"]
         direction TB
         R1["SELECT-only (no DML/DDL)"]
-        R2["LIMIT required"]
-        R3["user_id injected by service"]
+        R2["LIMIT auto-enforced (max 200 rows)"]
+        R3["EXPLAIN pre-flight validation"]
         R4["No CROSS JOIN / comma join"]
         R5["No set_config()"]
         R6["asyncpg type normalization"]
@@ -142,15 +142,15 @@ graph LR
 
 ## Query Generation Pipeline
 
-The LLM generates SQL against a documented schema. `schema.yaml` in `src/finance_query_agent/` documents tables, columns, business rules, and example queries; this is injected into the system prompt on every request. The governance layer (`validate_select_only`) validates the LLM-generated SQL before execution — enforcing SELECT-only, requiring a LIMIT, blocking dangerous patterns (CROSS JOIN, `set_config()`), and injecting `user_id` scoping.
+The LLM generates SQL against a documented schema. The schema context is built at cold start by `schema_builder.py` — fetching the semantic model from SSM and merging it with live DB introspection — then injected into the system prompt on every request. The governance layer (`validate_select_only` + `cap_limit`) validates the LLM-generated SQL before execution: enforcing SELECT-only, auto-capping LIMIT to 200 rows, blocking dangerous patterns (CROSS JOIN, `set_config()`). An `EXPLAIN` pre-flight then validates the query against the live schema in a readonly transaction before any data is read. User scoping is enforced by PostgreSQL RLS via `app.user_id` session variable set by the service.
 
 ```mermaid
 graph LR
-    SY["schema.yaml<br/>(tables, columns,<br/>business rules)"] --> SP[System Prompt]
+    SY["schema_builder.py<br/>(SSM semantic model<br/>+ live DB introspection)"] --> SP[System Prompt]
     SP --> LLM[LLM]
     LLM --> SQL["LLM-generated SQL"]
 
-    SQL --> GOV["SQL Governance<br/>(validate_select_only)"]
+    SQL --> GOV["SQL Governance<br/>(validate + cap_limit + EXPLAIN)"]
     UID["user_id<br/><i>injected by service</i>"] --> GOV
 
     GOV --> PG[(PostgreSQL)]
@@ -197,15 +197,19 @@ graph TB
     end
 
     subgraph ISOLATION["User Isolation"]
-        INJ["Service injects user_id<br/><i>from authenticated caller</i>"]
-        STRIP["Strips LLM-generated<br/>user_id conditions"]
-        SCOPE["Every query scoped<br/>WHERE user_id = $1"]
-        INJ --> STRIP --> SCOPE
+        INJ["Service sets app.user_id<br/><i>from authenticated caller</i>"]
+        RLS["PostgreSQL RLS enforces scoping<br/><i>policy: user_id = current_setting('app.user_id')</i>"]
+        INJ --> RLS
     end
 
     subgraph READONLY["Read-Only Enforcement"]
         ROLE["DB role: read-only<br/><i>security boundary</i>"]
         GOV["SQL governance (AST-level)<br/><i>defense in depth</i>"]
+        TXN["Readonly transaction<br/><i>conn.transaction(readonly=True)</i>"]
+    end
+
+    subgraph PREFLIGHT["Pre-Execution Validation"]
+        EXPLAIN["EXPLAIN pre-flight<br/><i>validates SQL against live schema<br/>without reading data</i>"]
     end
 
     subgraph PII["PII Protection"]
@@ -216,25 +220,27 @@ graph TB
     subgraph SQLS["SQL Safety"]
         PARAM["Parameterized queries<br/><i>$1, $2 — no interpolation</i>"]
         SELONLY["SELECT-only enforcement<br/><i>no DML/DDL</i>"]
-        LIMIT["LIMIT required on all queries"]
+        LIMIT["LIMIT auto-enforced<br/><i>max 200 rows; added if absent</i>"]
         TIMEOUT["30s query timeout"]
     end
 
     AUTH --> ISOLATION
     ISOLATION --> READONLY
-    ISOLATION --> SQLS
+    ISOLATION --> PREFLIGHT
+    PREFLIGHT --> SQLS
     PII ~~~ SQLS
 
     style AUTH fill:#5a3d2d,stroke:#a94,color:#fff
     style ISOLATION fill:#5a3d2d,stroke:#a94,color:#fff
     style READONLY fill:#5a3d2d,stroke:#a94,color:#fff
+    style PREFLIGHT fill:#2d5a3d,stroke:#4a9,color:#fff
     style PII fill:#3a3a5c,stroke:#88c,color:#fff
     style SQLS fill:#3a3a5c,stroke:#88c,color:#fff
 ```
 
 ## Schema Configuration
 
-`schema.yaml` in `src/finance_query_agent/` documents the database schema for the LLM: tables, columns, business rules (e.g., how expenses vs income are distinguished), and example queries. It is injected into the system prompt on every invocation. No client-side configuration is required.
+`schema_builder.py` builds the schema context injected into the system prompt on every invocation. At cold start it fetches the semantic model (tables, columns, business rules, example queries) from SSM Parameter Store, then merges it with live DB introspection. The result is cached for the lifetime of the Lambda instance. No client-side configuration is required.
 
 ## Invocation
 
@@ -278,9 +284,9 @@ src/finance_query_agent/
 ├── agent.py                Query agent + system prompt
 ├── visualization.py        Visualization agent (chart spec generation)
 ├── config.py               Settings from env vars
-├── sql_governance.py       SQL validation (SELECT-only, LIMIT, user_id injection)
-├── schema.yaml             DB schema documentation injected into system prompt
-├── connection.py           asyncpg single connection (Lambda-aware)
+├── sql_governance.py       SQL validation (SELECT-only, LIMIT cap, CROSS JOIN / set_config blocking)
+├── schema_builder.py       Schema context builder (SSM semantic model + live DB introspection)
+├── connection.py           asyncpg pool, warm-cached across Lambda invocations
 ├── memory.py               DynamoDB conversation history
 ├── encryption.py           Fernet field encryption
 ├── redaction.py            Regex PII scrubbing

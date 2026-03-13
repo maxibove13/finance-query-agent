@@ -49,6 +49,27 @@ class TestResolveSecrets:
         s.resolve_secrets()
         assert s.database_url == "postgresql://ro:pw@db.example.com:5432/mydb"
 
+    def test_db_credentials_with_special_chars_encoded(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Reserved characters in username/password must be percent-encoded."""
+        creds = json.dumps(
+            {
+                "username": "ro@user",
+                "password": "p@ss:word/db#1?x",
+                "host": "db.example.com",
+                "port": 5432,
+                "dbname": "mydb",
+            }
+        )
+        monkeypatch.setattr("finance_query_agent.config._resolve_secret", lambda arn: creds)
+
+        s = Settings(db_credentials_secret_arn="arn:aws:secretsmanager:us-east-1:123:secret:db")  # type: ignore[call-arg]
+        s.resolve_secrets()
+        assert s.database_url is not None
+        # Raw special chars must not appear in the authority section
+        assert "@db.example.com" in s.database_url
+        assert "ro%40user" in s.database_url
+        assert "p%40ss%3Aword%2Fdb%231%3Fx" in s.database_url
+
     def test_resolve_encryption_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
         creds = json.dumps({"username": "u", "password": "p", "host": "h", "port": 5432, "dbname": "d"})
         secrets = {"arn:db": creds, "arn:enc": "fernet-key-123"}

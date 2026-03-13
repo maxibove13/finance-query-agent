@@ -91,7 +91,6 @@ Include `[MPI-<NUMBER>]` in the PR title and `Closes MPI-<NUMBER>` in the PR bod
 ## Code Style
 
 - Run `uv run ruff check . --fix && uv run ruff format .` before commits.
-- All queries use parameterized values (`$1`, `$2`). Never string-interpolate user input into SQL.
 - This is a service (Lambda). No CLI, no HTTP server framework. Entry point is `handler.handler`.
 
 ## Common Gotchas

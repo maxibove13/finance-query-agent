@@ -9,10 +9,11 @@ import time
 from typing import Any
 
 import logfire
-from pydantic_ai import RunContext
+from pydantic_ai import ModelRetry, RunContext
 
+from finance_query_agent.exceptions import DatabaseConnectionError
 from finance_query_agent.schemas.responses import ToolCallRecord
-from finance_query_agent.sql_governance import validate_select_only
+from finance_query_agent.sql_governance import cap_limit, validate_select_only
 from finance_query_agent.tools import AgentDeps
 
 
@@ -36,10 +37,23 @@ async def execute_sql(ctx: RunContext[AgentDeps], sql: str) -> list[dict[str, An
     Only SELECT statements are permitted — write operations are rejected.
     User data is automatically scoped via Row Level Security.
     """
-    validate_select_only(sql)
+    try:
+        validate_select_only(sql)
+    except ValueError as exc:
+        raise ModelRetry(str(exc)) from exc
+
+    sql = cap_limit(sql)
+
+    try:
+        await ctx.deps.connection.explain(sql, ctx.deps.user_id)
+    except DatabaseConnectionError as exc:
+        raise ModelRetry(str(exc)) from exc
 
     start = time.monotonic()
-    rows = await ctx.deps.connection.execute_governed(sql, ctx.deps.user_id)
+    try:
+        rows = await ctx.deps.connection.execute_governed(sql, ctx.deps.user_id)
+    except DatabaseConnectionError as exc:
+        raise ModelRetry(str(exc)) from exc
     elapsed_ms = int((time.monotonic() - start) * 1000)
 
     result = [_normalize_row(dict(row)) for row in rows]

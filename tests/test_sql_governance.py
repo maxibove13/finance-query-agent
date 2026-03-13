@@ -1,15 +1,14 @@
-"""Unit tests for sql_governance.validate_select_only (no DB needed)."""
+"""Unit tests for sql_governance (no DB needed)."""
 
 from __future__ import annotations
 
 import pytest
 
-from finance_query_agent.sql_governance import validate_select_only
+from finance_query_agent.sql_governance import cap_limit, validate_select_only
 
 
 class TestValidSelectOnly:
     def test_simple_select_passes(self) -> None:
-        # No FROM → scalar, naturally bounded, no LIMIT needed
         validate_select_only("SELECT 1")
 
     def test_select_with_where_passes(self) -> None:
@@ -43,13 +42,7 @@ class TestValidSelectOnly:
         )
 
     def test_aggregate_without_group_by_passes_without_limit(self) -> None:
-        # SUM() without GROUP BY always returns exactly one row — LIMIT not required
         validate_select_only("SELECT SUM(amount) FROM account_movements")
-
-    def test_aggregate_with_group_by_requires_limit(self) -> None:
-        # GROUP BY can return many rows — LIMIT required
-        with pytest.raises(ValueError, match="(?i)limit"):
-            validate_select_only("SELECT account_id, SUM(amount) FROM account_movements GROUP BY account_id")
 
     def test_union_all_passes(self) -> None:
         validate_select_only(
@@ -59,16 +52,24 @@ class TestValidSelectOnly:
             "LIMIT 100"
         )
 
-    def test_union_all_without_limit_raises(self) -> None:
-        with pytest.raises(ValueError, match="(?i)limit"):
-            validate_select_only(
-                "SELECT amount FROM account_movements UNION ALL SELECT amount FROM credit_card_movements"
-            )
+    def test_select_without_limit_passes(self) -> None:
+        # LIMIT is enforced by cap_limit, not validate_select_only
+        validate_select_only("SELECT * FROM account_movements")
 
     def test_set_config_raises(self) -> None:
         with pytest.raises(ValueError, match="set_config"):
             validate_select_only(
                 "WITH s AS (SELECT set_config('app.user_id', '2', true)) SELECT * FROM accounts LIMIT 10"
+            )
+
+    def test_set_config_schema_qualified_raises(self) -> None:
+        with pytest.raises(ValueError, match="set_config"):
+            validate_select_only("SELECT pg_catalog.set_config('app.user_id', '99', true), id FROM accounts LIMIT 10")
+
+    def test_set_config_inline_where_raises(self) -> None:
+        with pytest.raises(ValueError, match="set_config"):
+            validate_select_only(
+                "SELECT * FROM accounts WHERE set_config('app.user_id', '99', true) IS NOT NULL LIMIT 10"
             )
 
     def test_insert_raises(self) -> None:
@@ -103,34 +104,88 @@ class TestValidSelectOnly:
         with pytest.raises(ValueError, match="(?i)comma join"):
             validate_select_only("SELECT * FROM accounts, account_movements LIMIT 100")
 
-    def test_select_without_limit_raises(self) -> None:
-        with pytest.raises(ValueError, match="(?i)limit"):
-            validate_select_only("SELECT * FROM account_movements")
+    def test_intersect_passes(self) -> None:
+        validate_select_only("SELECT id FROM accounts INTERSECT SELECT id FROM accounts LIMIT 10")
 
-    def test_select_with_limit_passes(self) -> None:
-        validate_select_only("SELECT * FROM account_movements LIMIT 100")
+    def test_except_passes(self) -> None:
+        validate_select_only("SELECT id FROM accounts EXCEPT SELECT id FROM accounts LIMIT 10")
 
-    def test_select_with_max_limit_passes(self) -> None:
-        validate_select_only("SELECT * FROM account_movements LIMIT 200")
+    def test_select_into_raises(self) -> None:
+        with pytest.raises(ValueError, match="(?i)into"):
+            validate_select_only("SELECT * INTO new_table FROM accounts")
 
-    def test_select_exceeding_max_limit_raises(self) -> None:
-        with pytest.raises(ValueError, match="200"):
-            validate_select_only("SELECT * FROM account_movements LIMIT 201")
 
-    def test_union_exceeding_max_limit_raises(self) -> None:
-        with pytest.raises(ValueError, match="200"):
-            validate_select_only(
-                "SELECT id FROM account_movements UNION ALL SELECT id FROM credit_card_movements LIMIT 201"
-            )
+class TestCapLimit:
+    def test_adds_limit_when_missing(self) -> None:
+        result = cap_limit("SELECT * FROM account_movements")
+        assert "LIMIT 200" in result.upper()
 
-    def test_limit_all_raises(self) -> None:
-        with pytest.raises(ValueError, match="plain integer"):
-            validate_select_only("SELECT * FROM account_movements LIMIT ALL")
+    def test_keeps_limit_within_bounds(self) -> None:
+        result = cap_limit("SELECT * FROM account_movements LIMIT 50")
+        assert "LIMIT 50" in result.upper()
+        assert "200" not in result
 
-    def test_limit_expression_raises(self) -> None:
-        with pytest.raises(ValueError, match="plain integer"):
-            validate_select_only("SELECT * FROM account_movements LIMIT 200 + 1")
+    def test_caps_limit_over_max(self) -> None:
+        result = cap_limit("SELECT * FROM account_movements LIMIT 300")
+        assert "LIMIT 200" in result.upper()
 
-    def test_limit_cast_raises(self) -> None:
-        with pytest.raises(ValueError, match="plain integer"):
-            validate_select_only("SELECT * FROM account_movements LIMIT CAST(10 AS INT)")
+    def test_caps_limit_all(self) -> None:
+        result = cap_limit("SELECT * FROM account_movements LIMIT ALL")
+        assert "LIMIT 200" in result.upper()
+
+    def test_caps_expression_limit(self) -> None:
+        result = cap_limit("SELECT * FROM account_movements LIMIT 200 + 1")
+        assert "LIMIT 200" in result.upper()
+
+    def test_caps_cast_limit(self) -> None:
+        result = cap_limit("SELECT * FROM account_movements LIMIT CAST(10 AS INT)")
+        assert "LIMIT 200" in result.upper()
+
+    def test_no_limit_added_to_scalar(self) -> None:
+        result = cap_limit("SELECT 1")
+        assert "LIMIT" not in result.upper()
+
+    def test_no_limit_added_to_ungrouped_aggregate(self) -> None:
+        result = cap_limit("SELECT SUM(amount) FROM account_movements")
+        assert "LIMIT" not in result.upper()
+
+    def test_aggregate_in_where_subquery_gets_capped(self) -> None:
+        # Aggregate is inside a WHERE subquery — outer query is not naturally bounded.
+        result = cap_limit(
+            "SELECT description FROM account_movements WHERE amount > (SELECT AVG(amount) FROM account_movements)"
+        )
+        assert "LIMIT 200" in result.upper()
+
+    def test_adds_limit_to_union(self) -> None:
+        result = cap_limit("SELECT amount FROM account_movements UNION ALL SELECT amount FROM credit_card_movements")
+        assert "LIMIT 200" in result.upper()
+
+    def test_caps_union_over_max(self) -> None:
+        result = cap_limit(
+            "SELECT amount FROM account_movements UNION ALL SELECT amount FROM credit_card_movements LIMIT 500"
+        )
+        assert "LIMIT 200" in result.upper()
+
+    def test_keeps_union_limit_within_bounds(self) -> None:
+        result = cap_limit(
+            "SELECT amount FROM account_movements UNION ALL SELECT amount FROM credit_card_movements LIMIT 100"
+        )
+        assert "LIMIT 100" in result.upper()
+        assert "200" not in result
+
+    def test_adds_limit_to_intersect(self) -> None:
+        result = cap_limit("SELECT id FROM accounts INTERSECT SELECT id FROM accounts")
+        assert "LIMIT 200" in result.upper()
+
+    def test_adds_limit_to_except(self) -> None:
+        result = cap_limit("SELECT id FROM accounts EXCEPT SELECT id FROM accounts")
+        assert "LIMIT 200" in result.upper()
+
+    def test_fetch_first_within_bounds_preserved(self) -> None:
+        result = cap_limit("SELECT * FROM account_movements FETCH FIRST 10 ROWS ONLY")
+        assert "200" not in result
+        assert "10" in result
+
+    def test_fetch_first_over_max_capped(self) -> None:
+        result = cap_limit("SELECT * FROM account_movements FETCH FIRST 500 ROWS ONLY")
+        assert "LIMIT 200" in result.upper()

@@ -136,7 +136,7 @@ INSERT INTO credit_card_movements (credit_card_id, category_id, issued_at, amoun
 INSERT INTO credit_card_movements (credit_card_id, category_id, issued_at, amount, description, movement_direction, currency) VALUES (1, 3, '2026-01-10', 15.99, 'Spotify', 'debit', 'USD');
 INSERT INTO credit_card_movements (credit_card_id, category_id, issued_at, amount, description, movement_direction, currency) VALUES (1, 3, '2026-02-10', 15.99, 'Spotify', 'debit', 'USD');
 
--- RLS: scope accounts and credit_cards by user_id
+-- RLS: user-owned tables only. tags is shared reference data (global taxonomy) — no RLS by design.
 ALTER TABLE accounts ENABLE ROW LEVEL SECURITY;
 CREATE POLICY user_isolation ON accounts FOR SELECT
   USING (user_id = NULLIF(current_setting('app.user_id', true), '')::integer);

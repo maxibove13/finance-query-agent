@@ -77,10 +77,11 @@ async def _process_request(body: dict[str, Any]) -> AgentResponse:
         raise ValueError(f"question exceeds maximum length of {settings.max_question_length} characters")
     if not isinstance(session_id, str) or not session_id.strip():
         raise ValueError("session_id must be a non-empty string")
+    session_id = session_id.strip()
     if len(session_id) > settings.max_session_id_length:
         raise ValueError(f"session_id exceeds maximum length of {settings.max_session_id_length} characters")
 
-    # Cast user_id: int if numeric, str otherwise
+    # user_id must be a positive integer (int or numeric string)
     if isinstance(raw_user_id, bool):
         raise ValueError("user_id must be an integer or string, got bool")
     if isinstance(raw_user_id, int):
@@ -107,14 +108,16 @@ async def _process_request(body: dict[str, Any]) -> AgentResponse:
             from finance_query_agent.observability import initialize
 
             initialize()
+            # tags is intentionally excluded: it is shared reference data (global taxonomy),
+            # not tenant-scoped. All user-owned tables are listed here.
             await conn.verify_rls_enabled(
                 ["accounts", "credit_cards", "account_movements", "credit_card_movements"],
                 strict=settings.aws_lambda_function_name is not None,
             )
             _initialized = True
 
-        # Load conversation history (DynamoDB always uses string keys)
-        history = await memory.load_history(str(raw_user_id), session_id)
+        # Load conversation history (DynamoDB always uses string keys; use normalized int)
+        history, history_version = await memory.load_history(str(user_id), session_id)
 
         # Run agent
         from pydantic_ai import UsageLimits
@@ -167,8 +170,14 @@ async def _process_request(body: dict[str, Any]) -> AgentResponse:
                 token_usage=TokenUsage(input_tokens=0, output_tokens=0),
             )
 
-        # Store updated conversation (DynamoDB always uses string keys)
-        await memory.save_history(str(raw_user_id), session_id, result.all_messages())
+        # Store updated conversation (DynamoDB always uses string keys; use normalized int)
+        from finance_query_agent.exceptions import ConversationConflictError
+
+        try:
+            await memory.save_history(str(user_id), session_id, result.all_messages(), history_version)
+        except ConversationConflictError:
+            logger.warning("Conversation conflict | user=%s session=%s", user_id, session_id)
+            raise
 
         usage = result.usage()
 

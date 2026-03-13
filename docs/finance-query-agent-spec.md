@@ -21,8 +21,8 @@ Users of financial applications need to ask natural language questions about the
 
 - Provide a **deployed financial query service** (`finance-query-agent`) that any application with a financial database can integrate via HTTP.
 - Use **Pydantic AI** as the agent framework.
-- Implement a **text-to-SQL** architecture: the LLM writes SQL against a schema documented in `schema.yaml`; a governance layer validates every query before execution.
-- **Schema documentation**: the DB schema, business rules, and example queries are documented in `schema.yaml` and injected into the system prompt. No client-side adapter code required.
+- Implement a **text-to-SQL** architecture: the LLM writes SQL against a schema injected into the system prompt; a governance layer validates every query before execution.
+- **Schema documentation**: the DB schema, business rules, and example queries are built at cold start by `schema_builder.py` (fetched from SSM and merged with live DB introspection) and injected into the system prompt. No client-side adapter code required.
 
 ## 4. Non-Goals
 
@@ -37,8 +37,8 @@ MPI Lambda ──> boto3 invoke ──> Agent Lambda
                                  ├── Pydantic AI Agent
                                  │   └── execute_sql  (single SQL tool)
                                  ├── SQL Governance (validate_select_only)
-                                 ├── schema.yaml (DB schema injected into system prompt)
-                                 ├── asyncpg → RDS (read-only, single connection)
+                                 ├── schema_builder.py (SSM semantic model + live DB introspection)
+                                 ├── asyncpg pool → RDS (read-only)
                                  ├── DynamoDB (encrypted conversation history)
                                  └── Logfire (PII-scrubbed traces)
 ```
@@ -49,20 +49,20 @@ MPI Lambda ──> boto3 invoke ──> Agent Lambda
 
 ## 6. Schema Documentation
 
-`schema.yaml` in `src/finance_query_agent/` is the single source of truth for the database schema exposed to the LLM. It documents:
+`schema_builder.py` builds the schema context injected into the system prompt on every invocation. At cold start it fetches the semantic model from SSM Parameter Store and merges it with live DB introspection. The result is cached for the lifetime of the Lambda instance. The semantic model documents:
 
 - Table names and their purpose
 - Column names and types
 - Business rules (e.g., how to distinguish expenses from income, what constitutes a transfer)
 - Example queries
 
-It is read at startup and injected verbatim into the system prompt on every invocation. The LLM uses it to write valid SQL against the actual schema.
+The LLM uses this context to write valid SQL against the actual schema.
 
 ## 7. SQL Tool & Governance
 
 ### 7.1 `execute_sql`
 
-The agent has exactly one tool: `execute_sql`. The LLM writes a SELECT query against the tables documented in `schema.yaml`. The tool passes the SQL through the governance layer before executing it.
+The agent has exactly one tool: `execute_sql`. The LLM writes a SELECT query against the schema injected into the system prompt. The tool passes the SQL through the governance layer before executing it.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -70,32 +70,32 @@ The agent has exactly one tool: `execute_sql`. The LLM writes a SELECT query aga
 
 Returns: query result rows as a list of dicts.
 
-### 7.2 `validate_select_only` — Governance Rules
+### 7.2 Governance Pipeline
 
-All LLM-generated SQL passes through `validate_select_only` in `sql_governance.py` before touching the database. It enforces six rules:
+All LLM-generated SQL passes through the following steps in order before any data is read:
 
-| Rule | Description |
+| Step | Description |
 |------|-------------|
-| SELECT-only | Rejects any statement that is not a SELECT (no INSERT, UPDATE, DELETE, DDL) |
-| LIMIT required | Every query must include a LIMIT clause |
-| user_id injection | The service strips any LLM-supplied `user_id` conditions and injects `WHERE user_id = $1` (parameterized) |
-| No CROSS JOIN | Blocks CROSS JOINs and comma-separated table lists in FROM (accidental cross products) |
-| No `set_config()` | Blocks attempts to call PostgreSQL's `set_config()` function |
-| asyncpg type normalization | Normalizes asyncpg-specific types (e.g., `asyncpg.pgproto.UUID`) to JSON-serializable Python types before returning results |
+| `validate_select_only` | Rejects any statement that is not a SELECT (no INSERT, UPDATE, DELETE, DDL, SELECT INTO, writes in CTEs) |
+| `cap_limit` | Enforces a maximum of 200 result rows — adds `LIMIT 200` if absent, caps higher values |
+| No CROSS JOIN | Blocks CROSS JOINs and implicit comma joins in FROM (accidental cross products) |
+| No `set_config()` | Blocks attempts to call PostgreSQL's `set_config()` function (would bypass RLS) |
+| `EXPLAIN` pre-flight | Runs `EXPLAIN {sql}` in a readonly transaction to validate the query against the live schema without reading data |
+| Readonly transaction | Every query executes inside `conn.transaction(readonly=True)` — a DB-level write guard |
+| User scoping via RLS | The service sets `app.user_id` as a session variable; PostgreSQL RLS policies enforce per-user data isolation |
+| asyncpg type normalization | Normalizes asyncpg-specific types (Decimal, date/datetime) to JSON-serializable Python types before returning results |
 
-Any rule violation raises a `GovernanceError` (subclass of `FinanceQueryError`), which is returned to the LLM as a tool error so it can retry with a corrected query.
+Governance violations raise `ValueError`, which is caught and returned to the LLM as a `ModelRetry` so it can correct the query.
 
 ## 8. Agent Configuration
 
 ### 8.1 Service Entry Point
 
-The service is deployed as an AWS Lambda invoked by the consuming app's backend via `boto3.client('lambda').invoke()`. The entry point is `handler.handler`. The caller wraps the payload as `{"body": json.dumps({...})}` to match the handler's event parsing. The Lambda timeout is 30 seconds to match the API Gateway limit.
+The service is deployed as an AWS Lambda invoked by the consuming app's backend via `boto3.client('lambda').invoke()`. The entry point is `handler.handler`. The caller sends a flat JSON payload directly — no `event["body"]` wrapping. The Lambda timeout is 30 seconds to match the API Gateway limit. `user_id` must be a positive integer (int or numeric string).
 
 ```
-# Payload wrapped in event["body"]
-
 {
-  "user_id": "user-123",
+  "user_id": 123,
   "session_id": "session-abc",
   "question": "How much did I spend on groceries last month?"
 }
@@ -114,7 +114,7 @@ Configuration is via environment variables (set by Terraform):
 
 ### 8.1.1 Connection Lifecycle
 
-The Lambda uses a single `asyncpg.connect()` per invocation (no pool). This matches Lambda's single-concurrent-request model. The connection is opened at the start of `_process_request` and closed in a `finally` block.
+The Lambda uses an `asyncpg` connection pool (min 1, max 5 connections) cached at module level across warm invocations. `Connection.connect()` creates the pool on first call and reuses it on subsequent warm invocations, terminating stale pools from a previous event loop if detected. The pool uses a 30-second `command_timeout` and `statement_timeout`.
 
 **Database URL format:** Raw `asyncpg` format: `postgresql://user:pass@host:port/dbname`. Resolved from Secrets Manager at runtime (JSON secret with `username`, `password`, `host`, `port`, `dbname`).
 
@@ -171,10 +171,10 @@ class ToolCallEvent:
 The default system prompt MUST:
 - Identify the agent as a financial data assistant.
 - **Inject the current date** (e.g., "Today is 2026-03-03") so the LLM can resolve relative dates ("last month" -> February 2026).
-- **Inject the full contents of `schema.yaml`** so the LLM knows the database schema.
+- **Inject the schema context** (built by `schema_builder.py`) so the LLM knows the database schema.
 - Instruct the LLM to resolve relative dates to absolute `date` values before writing SQL.
-- Instruct the LLM to always include a LIMIT in every query.
-- Instruct the LLM to never include `user_id` conditions (the service injects them).
+- Instruct the LLM to always include a LIMIT in every query (governance also enforces a hard cap of 200 rows).
+- Instruct the LLM to omit `user_id` conditions (user scoping is enforced by PostgreSQL RLS).
 - Instruct the LLM to ask clarifying questions when the user's query is ambiguous.
 - Instruct the LLM to format monetary values with currency symbols and two decimal places.
 - Instruct the LLM to never fabricate data — if a tool returns empty results, say so.
@@ -211,10 +211,10 @@ Financial data often spans multiple currencies. The LLM is aware of this via the
 
 | Requirement | Description |
 |-------------|-------------|
-| **S1 — User isolation** | Every query is scoped to a `user_id`. The governance layer strips any LLM-supplied `user_id` conditions and injects `WHERE user_id = $1` (parameterized). The LLM never controls user scoping. |
+| **S1 — User isolation** | Every query is scoped to a `user_id`. The service sets `app.user_id` as a PostgreSQL session variable; RLS policies enforce per-user data isolation at the DB level. The LLM never controls user scoping. |
 | **S2 — No credential exposure** | The `database_url` is resolved from Secrets Manager at runtime. The service never logs or transmits connection strings. |
 | **S3 — Read-only** | No tool can modify data. Enforced at DB role level (the security boundary) and reinforced by the SQL governance layer (SELECT-only enforcement). |
-| **S4 — Input sanitization** | All queries use parameterized values (`$1`, `$2`, etc.). The governance layer validates SQL structure before execution (AST-level SELECT-only check, LIMIT required, no CROSS JOIN, no `set_config()`). |
+| **S4 — Input sanitization** | All queries use parameterized values (`$1`, `$2`, etc.). The governance layer validates SQL structure before execution (AST-level SELECT-only check, LIMIT auto-enforced to max 200 rows, no CROSS JOIN, no `set_config()`), followed by an `EXPLAIN` pre-flight in a readonly transaction. |
 | **S5 — PII in LLM context** | Transaction descriptions sent to the LLM may contain PII (merchant names, amounts). The consuming application is responsible for PII handling policy via the `pre_llm_hook`. |
 
 ## 12. Observability Requirements
@@ -234,9 +234,9 @@ finance-query-agent/
 │   └── finance_query_agent/
 │       ├── __init__.py               <- Package exports and exceptions
 │       ├── agent.py                  <- Pydantic AI agent definition + system prompt
-│       ├── sql_governance.py         <- validate_select_only (6 governance rules)
-│       ├── schema.yaml               <- DB schema documentation injected into system prompt
-│       ├── connection.py             <- asyncpg single connection (Lambda-aware)
+│       ├── sql_governance.py         <- validate_select_only + cap_limit (governance pipeline)
+│       ├── schema_builder.py         <- schema context builder (SSM semantic model + live DB introspection)
+│       ├── connection.py             <- asyncpg pool, warm-cached across Lambda invocations
 │       ├── tools/
 │       │   └── sql.py                <- execute_sql tool + asyncpg type normalization
 │       └── schemas/
@@ -275,29 +275,28 @@ import boto3
 
 lambda_client = boto3.client("lambda")
 
-async def query_agent(user_id: str, session_id: str, question: str) -> dict:
+async def query_agent(user_id: int, session_id: str, question: str) -> dict:
     payload = {"user_id": user_id, "session_id": session_id, "question": question}
     response = lambda_client.invoke(
         FunctionName="finance-query-agent",
-        Payload=json.dumps({"body": json.dumps(payload)}),
+        Payload=json.dumps(payload),
     )
-    result = json.loads(response["Payload"].read())
-    return json.loads(result["body"])
+    return json.loads(response["Payload"].read())
 ```
 
 ## 15. Design Decisions & Clarifications
 
-### 15.1 Single Connection Model
+### 15.1 Connection Pool Model
 
-The service uses a single `asyncpg.connect()` per Lambda invocation instead of a connection pool. This matches Lambda's execution model (one concurrent request per instance). The connection is created at request start and closed in a `finally` block. DB credentials are resolved from Secrets Manager on cold start and cached via `lru_cache`.
+The service uses an `asyncpg` connection pool (min 1, max 5) cached at module level across warm Lambda invocations. On cold start the pool is created; on warm invocations it is reused, with stale pools (loop mismatch) detected and replaced. DB credentials are resolved from Secrets Manager on cold start and cached via `lru_cache`.
 
 ### 15.2 Governance Error Recovery
 
 When `validate_select_only` rejects a query, the error is returned to the LLM as a tool call failure with a description of the rule that was violated. The LLM can retry with a corrected query. This is intentional — the LLM learns within the conversation what constraints it must respect.
 
-### 15.3 user_id Injection
+### 15.3 User Isolation via RLS
 
-The governance layer strips any `WHERE user_id = ...` condition written by the LLM and replaces it with a parameterized `WHERE user_id = $1` using the authenticated `user_id` from the Lambda event. This prevents the LLM from querying another user's data even if prompted to do so.
+User scoping is enforced by PostgreSQL Row Level Security. Before executing a query the service sets `app.user_id` as a session variable (`SET LOCAL app.user_id = $1`) inside a readonly transaction. RLS policies on each table filter rows to the current user. The LLM is instructed to omit `user_id` conditions; even if it includes one, RLS enforces the correct boundary independently.
 
 ## 16. Open Questions
 

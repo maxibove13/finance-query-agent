@@ -10,6 +10,7 @@ import pytest
 from pydantic_ai.exceptions import UsageLimitExceeded
 
 import finance_query_agent.handler as handler_module
+from finance_query_agent.exceptions import ConversationConflictError
 from finance_query_agent.handler import _process_request, handler
 from finance_query_agent.schemas.responses import AnswerWithVisualization, TextAnswer
 
@@ -53,7 +54,7 @@ def _build_mocks() -> dict:
     """Build mock objects for all _process_request external dependencies."""
     conn = AsyncMock()
     memory = AsyncMock()
-    memory.load_history.return_value = []
+    memory.load_history.return_value = ([], 0)
 
     usage = MagicMock(input_tokens=100, output_tokens=50)
     result = MagicMock()
@@ -468,3 +469,33 @@ class TestInputValidation:
             _apply(stack, mocks["targets"])
             resp = await _process_request({"user_id": 1, "session_id": "s1", "question": "  test?  "})
         assert resp.original_question == "test?"
+
+    @pytest.mark.asyncio()
+    async def test_strips_whitespace_from_session_id(self, mocks: dict) -> None:
+        with ExitStack() as stack:
+            _apply(stack, mocks["targets"])
+            await _process_request({"user_id": 1, "session_id": "  s1  ", "question": "test?"})
+
+        args = mocks["memory"].save_history.call_args[0]
+        assert args[1] == "s1"
+
+
+class TestConversationConflict:
+    @pytest.fixture(autouse=True)
+    def _reset_init(self):
+        handler_module._initialized = False
+        yield
+        handler_module._initialized = False
+
+    @pytest.fixture()
+    def mocks(self):
+        return _build_mocks()
+
+    @pytest.mark.asyncio()
+    async def test_conflict_on_save_propagates(self, mocks: dict) -> None:
+        mocks["memory"].save_history.side_effect = ConversationConflictError("concurrent write")
+
+        with ExitStack() as stack:
+            _apply(stack, mocks["targets"])
+            with pytest.raises(ConversationConflictError):
+                await _process_request(_BODY)
