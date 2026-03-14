@@ -14,6 +14,19 @@ from testcontainers.postgres import PostgresContainer
 from finance_query_agent.connection import Connection
 from finance_query_agent.encryption import FieldEncryptor
 
+# Semantic model used by sql_governance's table allowlist validation
+_TEST_SEMANTIC = {
+    "description": "Test DB",
+    "tables": [
+        {"name": "accounts"},
+        {"name": "account_movements"},
+        {"name": "tags"},
+        {"name": "credit_cards"},
+        {"name": "credit_card_movements"},
+    ],
+    "relationships": [],
+}
+
 
 def _docker_available() -> bool:
     try:
@@ -165,6 +178,14 @@ CREATE ROLE app_user WITH LOGIN PASSWORD 'app_test_pw';
 GRANT USAGE ON SCHEMA public TO app_user;
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO app_user;
 """
+
+
+@pytest.fixture(autouse=True)
+def _patch_semantic(monkeypatch):
+    """Ensure schema_builder uses test semantic model instead of fetching from SSM/S3."""
+    import finance_query_agent.schema_builder as sb
+
+    monkeypatch.setattr(sb, "_SEMANTIC", _TEST_SEMANTIC)
 
 
 @pytest.fixture(scope="session")

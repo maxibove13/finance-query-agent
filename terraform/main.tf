@@ -72,10 +72,10 @@ resource "aws_iam_role_policy" "lambda_app" {
       {
         Effect = "Allow"
         Action = [
-          "ssm:GetParameter",
+          "s3:GetObject",
         ]
         Resource = [
-          "arn:aws:ssm:us-east-1:*:parameter/mpi/finance-agent/*",
+          "arn:aws:s3:::${var.semantic_model_s3_bucket}/${var.semantic_model_s3_key}",
         ]
       },
     ]
@@ -115,7 +115,8 @@ resource "aws_lambda_function" "agent" {
       AUDIT_TABLE               = aws_dynamodb_table.audit.name
       PRIMARY_MODEL             = var.primary_model
       SECONDARY_MODEL           = var.secondary_model
-      SEMANTIC_MODEL_SSM_PATH   = "/mpi/finance-agent/semantic-model"
+      SEMANTIC_MODEL_S3_BUCKET  = var.semantic_model_s3_bucket
+      SEMANTIC_MODEL_S3_KEY     = var.semantic_model_s3_key
       DB_CREDENTIALS_SECRET_ARN = aws_secretsmanager_secret.db_credentials.arn
       ENCRYPTION_KEY_SECRET_ARN = aws_secretsmanager_secret.encryption_key.arn
       LLM_API_KEY_SECRET_ARN    = aws_secretsmanager_secret.llm_api_key.arn

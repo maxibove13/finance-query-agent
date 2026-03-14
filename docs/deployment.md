@@ -29,9 +29,9 @@ Required Terraform variables (passed via `TF_VAR_*` in CI):
 
 ## Schema Config
 
-The `SchemaMapping` JSON is stored in SSM Parameter Store at `/<project-name>/schema-config`. The SSM parameter is created by Terraform on first deploy. After that, the client's CI/CD pipeline (e.g. MPI) is responsible for updating it via `aws ssm put-parameter --overwrite`.
+The semantic model YAML is stored in S3 at the bucket/key configured by `SEMANTIC_MODEL_S3_BUCKET` and `SEMANTIC_MODEL_S3_KEY` (default: `semantic-model.yaml`). The S3 bucket is created by Terraform on first deploy. The client's CI/CD pipeline (e.g. MPI) is responsible for uploading updates.
 
-**Important:** The Lambda reads SSM once per cold start (cached via `get_settings()`). After updating the parameter, force a cold start so the Lambda picks up the new config:
+**Important:** The Lambda reads S3 once per cold start and caches the result. After updating the semantic model, force a cold start so the Lambda picks up the new config:
 
 ```bash
 aws lambda update-function-configuration \
@@ -39,7 +39,7 @@ aws lambda update-function-configuration \
   --description "schema config updated $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 ```
 
-If the new schema config is invalid or doesn't match the live database, the Lambda will log a critical error on the first request after the cold start and return an error response. Monitor CloudWatch for `CRITICAL` log entries after schema updates.
+If the new semantic model is invalid, the Lambda will log a critical error on the first request after the cold start and return an error response. Monitor CloudWatch for `CRITICAL` log entries after schema updates.
 
 ## Secrets
 

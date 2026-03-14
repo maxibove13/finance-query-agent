@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Deployed financial query agent service (Lambda invoked by MPI's backend via boto3) that answers natural language questions about spending, income, and transactions. Uses Pydantic AI as the agent framework with predefined parameterized query tools. Owns conversation memory (DynamoDB), observability (Logfire), and PII protection (Fernet encryption + regex scrubbing).
+Deployed financial query agent service (Lambda invoked by MPI's backend via boto3) that answers natural language questions about spending, income, and transactions. Uses a **text-to-SQL** architecture: the LLM writes SQL against a documented schema; a governance layer validates every query before execution. A secondary visualization agent generates Vega-Lite chart specs when data is chartable. Owns conversation memory (DynamoDB), audit logging (DynamoDB), observability (Logfire), and PII protection (Fernet encryption + regex scrubbing).
 
 **Primary client:** MPI (My Personal Income) — the frontend/app project at `../my_personal_incomes_ai`.
 
@@ -41,28 +41,30 @@ uv build                          # Build package
 
 ```
 Browser -> MPI API Gateway -> MPI Lambda -> boto3 invoke -> Agent Lambda
-                                                             ├── asyncpg -> RDS (read-only, single connection)
-                                                             ├── Pydantic AI -> LLM API
-                                                             ├── DynamoDB (encrypted conversation history)
+                                                             ├── asyncpg pool -> RDS (read-only, min 1 / max 5)
+                                                             ├── Pydantic AI -> LLM API (primary + secondary model)
+                                                             ├── DynamoDB (encrypted conversation history + audit trail)
                                                              └── Logfire (PII-scrubbed traces)
 ```
 
 | What | Where |
 |------|-------|
 | Lambda handler (entry point) | `src/finance_query_agent/handler.py` |
-| Agent definition (Pydantic AI) | `src/finance_query_agent/agent.py` |
+| Query agent definition (Pydantic AI) | `src/finance_query_agent/agent.py` |
+| Visualization agent (Vega-Lite chart specs) | `src/finance_query_agent/visualization.py` |
+| Vega-Lite spec builder (intent → full spec) | `src/finance_query_agent/vega_builder.py` |
 | Settings from env vars | `src/finance_query_agent/config.py` |
-| SQL generation from schema mappings | `src/finance_query_agent/query_builder.py` |
-| asyncpg single connection (Lambda-aware) | `src/finance_query_agent/connection.py` |
+| Schema context builder (S3 semantic model) | `src/finance_query_agent/schema_builder.py` |
+| SQL governance (SELECT-only, LIMIT, EXPLAIN) | `src/finance_query_agent/sql_governance.py` |
+| asyncpg connection pool (warm-cached) | `src/finance_query_agent/connection.py` |
 | DynamoDB conversation memory | `src/finance_query_agent/memory.py` |
+| DynamoDB SQL audit logging | `src/finance_query_agent/audit.py` |
 | Fernet field encryption | `src/finance_query_agent/encryption.py` |
 | Regex PII scrubbing | `src/finance_query_agent/redaction.py` |
 | Conversation summarization | `src/finance_query_agent/history.py` |
-| Logfire + scrubbing callback | `src/finance_query_agent/observability.py` |
-| View-backed tools (expenses, income, balances) | `src/finance_query_agent/tools/unified.py` |
-| Direct query tools (transactions, recurring) | `src/finance_query_agent/tools/transactions.py`, `recurring.py` |
-| Schema validation | `src/finance_query_agent/validation/` |
-| Pydantic models (mapping, results, responses) | `src/finance_query_agent/schemas/` |
+| Logfire initialization | `src/finance_query_agent/observability.py` |
+| `execute_sql` tool | `src/finance_query_agent/tools/sql.py` |
+| Pydantic models (charts, responses) | `src/finance_query_agent/schemas/` |
 | Exception hierarchy | `src/finance_query_agent/exceptions.py` |
 | Terraform module | `terraform/` |
 | Tests | `tests/` |
@@ -70,13 +72,15 @@ Browser -> MPI API Gateway -> MPI Lambda -> boto3 invoke -> Agent Lambda
 ## Key Design Decisions
 
 - **Service, not SDK:** Lambda invoked by MPI's backend via `boto3 lambda.invoke()` (30s timeout). Synchronous request-response.
-- **Tools-as-wrappers:** The LLM picks a tool and fills params; the service generates and executes parameterized SQL. No raw SQL from the LLM.
-- **Schema mapping:** Declarative `SchemaMapping` config with optional `ViewMapping` for materialized views. View-backed tools query pre-computed views; direct query tools use `QueryBuilder`.
-- **Multi-currency:** View-backed tools support `currency` param (`usd`/`local`) for pre-converted amounts. Direct query tools return raw per-transaction currency.
-- **User isolation:** Every query scoped to `user_id`. Injected by the service, never by the LLM.
+- **Text-to-SQL:** Single `execute_sql` tool. The LLM writes SQL against a schema injected into the system prompt; a governance layer validates every query before execution.
+- **Schema from S3:** Semantic model (YAML) fetched from S3 at cold start by `schema_builder.py`. No DB introspection — the YAML is the sole source of truth.
+- **Two models:** `primary_model` (gpt-4.1) for the query agent, `secondary_model` (gpt-4.1-mini) for visualization and history summarization.
+- **Multi-currency:** The `execute_sql` tool returns raw per-transaction currency values; the LLM formats and groups them in the answer.
+- **User isolation:** Every query scoped to `user_id` via PostgreSQL RLS. Injected by the service, never by the LLM.
 - **Read-only:** No write operations. Enforced at DB role level (security boundary).
-- **PII protection:** Two layers — Fernet encryption at rest (DynamoDB), regex scrubbing in traces (Logfire). No NER models.
-- **Single connection:** One `asyncpg.connect()` per invocation (no pool). Matches Lambda's single-request model.
+- **PII protection:** Two layers — Fernet encryption at rest (DynamoDB), regex scrubbing in audit logs and traces (Logfire). No NER models.
+- **Connection pool:** `asyncpg` pool (min 1, max 5) cached at module level across warm Lambda invocations. Stale pools (loop mismatch) detected and replaced.
+- **Audit trail:** Every invocation logged to a DynamoDB audit table with PII-redacted SQL, row counts, timing, and token usage. 90-day TTL.
 
 ## Branching
 
@@ -96,7 +100,7 @@ Include `[MPI-<NUMBER>]` in the PR title and `Closes MPI-<NUMBER>` in the PR bod
 ## Common Gotchas
 
 - `asyncpg` uses `$1` style parameters, not `%s` or `?`.
-- `SchemaMapping` validation happens on cold start against the live DB.
-- `AmountConvention` determines expense vs income filtering — every spending tool depends on it.
+- Semantic model YAML is fetched from S3 at cold start and cached. Changes require a new deployment or cold start.
 - `AWS_LAMBDA_FUNCTION_NAME` env var is used for Lambda detection (prod vs dev behavior).
 - DynamoDB `user_id` must be a separate top-level attribute, not extracted from composite PK.
+- Governance violations raise `ValueError` → caught as `ModelRetry` so the LLM can self-correct.

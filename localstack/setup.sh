@@ -122,29 +122,36 @@ aws --endpoint-url="$ENDPOINT" s3 cp "$ZIP_PATH" "s3://$BUCKET/lambda.zip" --reg
 
 ENCRYPTION_KEY=$(python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
 
-# ── 6. Build environment JSON ───────────────────────────────────────────────
+# ── 5b. Upload semantic model to S3 ────────────────────────────────────────
 
-# Minify schema JSON to single line (no newlines inside the env var value)
-SCHEMA_JSON=$(python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin), separators=(',',':')))" < "$SCRIPT_DIR/schema-config.json")
+SEMANTIC_BUCKET="mpi-finance-agent-semantic-model"
+SEMANTIC_KEY="semantic-model.yaml"
+echo "Uploading semantic model to s3://$SEMANTIC_BUCKET/$SEMANTIC_KEY"
+aws --endpoint-url="$ENDPOINT" s3 mb "s3://$SEMANTIC_BUCKET" --region "$REGION" 2>/dev/null || true
+aws --endpoint-url="$ENDPOINT" s3 cp "$SCRIPT_DIR/semantic-model.yaml" "s3://$SEMANTIC_BUCKET/$SEMANTIC_KEY" --region "$REGION" --quiet
+
+# ── 6. Build environment JSON ───────────────────────────────────────────────
 
 ENV_JSON=$(python3 -c "
 import json, sys
 env = {
     'Variables': {
         'DATABASE_URL': sys.argv[1],
-        'SCHEMA_CONFIG_JSON': sys.argv[2],
-        'OPENAI_API_KEY': sys.argv[3],
-        'QUERY_MODEL': sys.argv[4],
+        'OPENAI_API_KEY': sys.argv[2],
+        'PRIMARY_MODEL': sys.argv[3],
+        'SECONDARY_MODEL': sys.argv[4],
         'DYNAMODB_TABLE': sys.argv[5],
         'DYNAMODB_REGION': sys.argv[6],
         'ENCRYPTION_KEY': sys.argv[7],
+        'SEMANTIC_MODEL_S3_BUCKET': sys.argv[8],
+        'SEMANTIC_MODEL_S3_KEY': sys.argv[9],
         'AWS_ENDPOINT_URL': 'http://host.docker.internal:4566',
         'AWS_ACCESS_KEY_ID': 'test',
         'AWS_SECRET_ACCESS_KEY': 'test',
     }
 }
 print(json.dumps(env))
-" "$DATABASE_URL" "$SCHEMA_JSON" "$OPENAI_API_KEY" "${QUERY_MODEL:-openai:gpt-4o}" "$TABLE_NAME" "$REGION" "$ENCRYPTION_KEY")
+" "$DATABASE_URL" "$OPENAI_API_KEY" "${QUERY_MODEL:-openai:gpt-4.1}" "${SECONDARY_MODEL:-openai:gpt-4.1-mini}" "$TABLE_NAME" "$REGION" "$ENCRYPTION_KEY" "$SEMANTIC_BUCKET" "$SEMANTIC_KEY")
 
 # ── 7. Create Lambda function ───────────────────────────────────────────────
 

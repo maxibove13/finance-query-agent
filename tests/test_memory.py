@@ -168,6 +168,34 @@ class TestConversationMemory:
         _, v2 = await mem.load_history("user-1", "session-1")
         assert v2 == 2
 
+    async def test_legacy_item_without_version_can_be_updated(self, dynamodb_table, encryptor):
+        """Legacy DynamoDB items without a version attribute should be updatable with expected_version=0."""
+        mem = ConversationMemory("test_conversations", "us-east-1", encryptor)
+        messages = _sample_messages()
+        serialized = ModelMessagesTypeAdapter.dump_json(messages).decode()
+        encrypted = encryptor.encrypt(serialized)
+        # Insert a legacy item without a version attribute
+        dynamodb_table.put_item(
+            Item={
+                "PK": "USER#legacy-user",
+                "SK": "SESSION#legacy-session",
+                "user_id": "legacy-user",
+                "messages_json": encrypted,
+                "created_at": "2025-01-01T00:00:00+00:00",
+                "updated_at": "2025-01-01T00:00:00+00:00",
+            }
+        )
+        # Verify the item has no version
+        response = dynamodb_table.get_item(Key={"PK": "USER#legacy-user", "SK": "SESSION#legacy-session"})
+        assert "version" not in response["Item"]
+        # save_history with expected_version=0 should succeed
+        updated = _sample_messages() + [ModelRequest(parts=[UserPromptPart(content="Follow-up")])]
+        await mem.save_history("legacy-user", "legacy-session", updated, expected_version=0)
+        # After save, version should be 1
+        loaded, version = await mem.load_history("legacy-user", "legacy-session")
+        assert version == 1
+        assert len(loaded) == 3
+
 
 class TestMemoryErrorLogging:
     async def test_load_history_logs_on_dynamo_error(self, encryptor, caplog):

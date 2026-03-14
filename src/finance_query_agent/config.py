@@ -39,7 +39,9 @@ class Settings(BaseSettings):
     encryption_key_secret_arn: str | None = None
     llm_api_key_secret_arn: str | None = None
     logfire_token_secret_arn: str | None = None
-    semantic_model_ssm_path: str = "/mpi/finance-agent/semantic-model"
+    semantic_model_s3_bucket: str | None = None  # S3 bucket containing the semantic model YAML
+    semantic_model_s3_key: str = "semantic-model.yaml"  # S3 key for the semantic model
+    semantic_model_local_path: str | None = None  # local YAML file path (for dev/test, overrides S3)
 
     def resolve_secrets(self) -> None:
         """Fetch secrets from AWS Secrets Manager."""

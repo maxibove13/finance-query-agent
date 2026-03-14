@@ -59,6 +59,42 @@ def _walk_and_check(statement: exp.Expression) -> None:
             raise ValueError("set_config() is not allowed in queries")
 
 
+def _is_inside_own_cte(table: exp.Table, name: str) -> bool:
+    """True if *table* sits inside a CTE whose alias is *name*.
+
+    This catches the self-referencing pattern
+    ``WITH foo AS (SELECT * FROM foo) SELECT * FROM foo``
+    where the inner ``foo`` is the real table (must be validated) while the
+    outer ``foo`` merely references the CTE (should be skipped).
+    """
+    parent = table.parent
+    while parent is not None:
+        if isinstance(parent, exp.CTE) and parent.alias and parent.alias.lower() == name:
+            return True
+        parent = parent.parent
+    return False
+
+
+def validate_allowed_tables(sql: str, allowed_tables: frozenset[str]) -> None:
+    """Raise ValueError if the query references tables not in the semantic model."""
+    statement = sqlglot.parse_one(sql, dialect="postgres")
+    cte_names = {cte.alias.lower() for cte in statement.find_all(exp.CTE) if cte.alias}
+    disallowed: list[str] = []
+    for t in statement.find_all(exp.Table):
+        if not t.name:
+            continue
+        name_lower = t.name.lower()
+        if name_lower in cte_names and not _is_inside_own_cte(t, name_lower):
+            continue
+        schema = (t.db or "").lower()
+        if schema and schema != "public":
+            disallowed.append(t.sql(dialect="postgres"))
+        elif name_lower not in allowed_tables:
+            disallowed.append(name_lower)
+    if disallowed:
+        raise ValueError(f"Query references tables not in the schema: {', '.join(sorted(disallowed))}")
+
+
 _MAX_ROWS = 200
 
 

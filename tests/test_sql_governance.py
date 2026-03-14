@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from finance_query_agent.sql_governance import cap_limit, validate_select_only
+from finance_query_agent.sql_governance import cap_limit, validate_allowed_tables, validate_select_only
 
 
 class TestValidSelectOnly:
@@ -113,6 +113,75 @@ class TestValidSelectOnly:
     def test_select_into_raises(self) -> None:
         with pytest.raises(ValueError, match="(?i)into"):
             validate_select_only("SELECT * INTO new_table FROM accounts")
+
+
+class TestValidateAllowedTables:
+    def test_allowed_tables_passes_valid_query(self) -> None:
+        validate_allowed_tables(
+            "SELECT id, amount FROM accounts WHERE id = 1",
+            frozenset({"accounts"}),
+        )
+
+    def test_allowed_tables_rejects_pg_catalog(self) -> None:
+        with pytest.raises(ValueError, match="not in the schema"):
+            validate_allowed_tables(
+                "SELECT * FROM pg_catalog.pg_tables",
+                frozenset({"accounts"}),
+            )
+
+    def test_allowed_tables_rejects_information_schema(self) -> None:
+        with pytest.raises(ValueError, match="not in the schema"):
+            validate_allowed_tables(
+                "SELECT * FROM information_schema.columns",
+                frozenset({"accounts"}),
+            )
+
+    def test_allowed_tables_cte_alias_not_rejected(self) -> None:
+        validate_allowed_tables(
+            "WITH monthly AS (SELECT id FROM accounts) SELECT * FROM monthly",
+            frozenset({"accounts"}),
+        )
+
+    def test_allowed_tables_rejects_unknown_table(self) -> None:
+        with pytest.raises(ValueError, match="not in the schema.*secret_data"):
+            validate_allowed_tables(
+                "SELECT * FROM secret_data",
+                frozenset({"accounts"}),
+            )
+
+    def test_allowed_tables_join(self) -> None:
+        validate_allowed_tables(
+            "SELECT a.id FROM accounts a JOIN movements m ON a.id = m.account_id",
+            frozenset({"accounts", "movements"}),
+        )
+
+    def test_allowed_tables_rejects_schema_qualified_non_public(self) -> None:
+        with pytest.raises(ValueError, match="not in the schema"):
+            validate_allowed_tables(
+                "SELECT * FROM analytics.accounts",
+                frozenset({"accounts"}),
+            )
+
+    def test_allowed_tables_allows_public_schema(self) -> None:
+        validate_allowed_tables(
+            "SELECT * FROM public.accounts",
+            frozenset({"accounts"}),
+        )
+
+    def test_allowed_tables_rejects_cte_shadowing_disallowed_table(self) -> None:
+        """CTE alias matching a real table must not hide the underlying table."""
+        with pytest.raises(ValueError, match="not in the schema"):
+            validate_allowed_tables(
+                "WITH secret AS (SELECT * FROM secret) SELECT * FROM secret",
+                frozenset({"accounts"}),
+            )
+
+    def test_allowed_tables_rejects_cte_shadowing_pg_catalog(self) -> None:
+        with pytest.raises(ValueError, match="not in the schema"):
+            validate_allowed_tables(
+                "WITH pg_tables AS (SELECT * FROM pg_catalog.pg_tables) SELECT * FROM pg_tables",
+                frozenset({"accounts"}),
+            )
 
 
 class TestCapLimit:

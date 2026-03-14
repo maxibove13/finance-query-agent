@@ -1,0 +1,220 @@
+description: >
+  Personal finance database tracking bank account and credit card transactions,
+  categorized by tags, with multi-currency support (USD, UYU).
+
+tables:
+  - name: accounts
+    description: Bank accounts owned by users. Each account has a single currency.
+    dimensions:
+      - name: id
+        description: Primary key
+        data_type: integer
+      - name: user_id
+        description: Owner of the account (used for RLS — do NOT filter by this)
+        data_type: integer
+        access: private
+      - name: alias
+        description: Human-readable account name
+        data_type: "varchar(255)"
+        synonyms: [name, account_name, label]
+      - name: currency
+        description: ISO 4217 currency code
+        data_type: "varchar(3)"
+        is_enum: true
+        sample_values: [USD, UYU]
+
+  - name: account_movements
+    description: >
+      Bank account transactions (debits and credits). Join to accounts for
+      currency and account name. Join to tags for category name.
+    dimensions:
+      - name: id
+        description: Primary key
+        data_type: integer
+      - name: account_id
+        description: FK to accounts.id
+        data_type: integer
+      - name: category_id
+        description: FK to tags.id (nullable — uncategorized transactions)
+        data_type: integer
+        nullable: true
+      - name: description
+        description: Merchant or transaction description
+        data_type: text
+        synonyms: [merchant, payee, vendor]
+      - name: movement_direction
+        description: "'debit' = expense/outflow, 'credit' = income/inflow"
+        data_type: "varchar(10)"
+        is_enum: true
+        sample_values: [debit, credit]
+    time_dimensions:
+      - name: issued_at
+        description: Date the transaction occurred
+        data_type: date
+        synonyms: [date, transaction_date, when]
+    facts:
+      - name: amount
+        description: Transaction amount (always positive; direction from movement_direction)
+        data_type: "numeric(15,2)"
+        synonyms: [value, total]
+      - name: balance
+        description: Account balance after this transaction (nullable)
+        data_type: "numeric(15,2)"
+        nullable: true
+        non_additive: true
+    metrics:
+      - name: total_expenses
+        expr: SUM(amount)
+        filter:
+          expr: "movement_direction = 'debit'"
+        description: Sum of all expense (debit) amounts
+      - name: total_income
+        expr: SUM(amount)
+        filter:
+          expr: "movement_direction = 'credit'"
+        description: Sum of all income (credit) amounts
+      - name: transaction_count
+        expr: COUNT(*)
+        description: Number of transactions
+
+  - name: credit_cards
+    description: Credit cards owned by users.
+    dimensions:
+      - name: id
+        description: Primary key
+        data_type: integer
+      - name: user_id
+        description: Owner of the credit card (used for RLS — do NOT filter by this)
+        data_type: integer
+        access: private
+      - name: currency
+        description: ISO 4217 currency code
+        data_type: "varchar(3)"
+        is_enum: true
+        sample_values: [USD]
+
+  - name: credit_card_movements
+    description: >
+      Credit card transactions. Join to credit_cards for card info.
+      Join to tags for category name. Has its own currency column per transaction.
+    dimensions:
+      - name: id
+        description: Primary key
+        data_type: integer
+      - name: credit_card_id
+        description: FK to credit_cards.id
+        data_type: integer
+      - name: category_id
+        description: FK to tags.id (nullable)
+        data_type: integer
+        nullable: true
+      - name: description
+        description: Merchant or transaction description
+        data_type: text
+        synonyms: [merchant, payee, vendor]
+      - name: movement_direction
+        description: "'debit' = expense/outflow, 'credit' = income/inflow"
+        data_type: "varchar(10)"
+        is_enum: true
+        sample_values: [debit, credit]
+      - name: currency
+        description: Currency of this specific transaction
+        data_type: "varchar(3)"
+        is_enum: true
+        sample_values: [USD]
+    time_dimensions:
+      - name: issued_at
+        description: Date the transaction occurred
+        data_type: date
+        synonyms: [date, transaction_date, when]
+    facts:
+      - name: amount
+        description: Transaction amount (always positive; direction from movement_direction)
+        data_type: "numeric(15,2)"
+        synonyms: [value, total]
+
+  - name: tags
+    description: >
+      Category taxonomy for transactions. Shared reference data (not user-scoped).
+      Join to account_movements or credit_card_movements via category_id.
+    dimensions:
+      - name: id
+        description: Primary key
+        data_type: integer
+      - name: name
+        description: Category name
+        data_type: "varchar(100)"
+        synonyms: [category, tag, label]
+        is_enum: true
+        sample_values: [groceries, transport, entertainment, utilities, restaurants]
+
+filters:
+  - name: subscriptions
+    synonyms: [recurring, monthly subscriptions]
+    description: Recurring subscription services
+    expr: "description ILIKE ANY(ARRAY['%spotify%', '%netflix%'])"
+  - name: dining_out
+    synonyms: [restaurants, eating out]
+    description: Restaurant and dining expenses
+    expr: "tags.name = 'restaurants'"
+    requires_join: tags
+
+relationships:
+  - left_table: account_movements
+    right_table: accounts
+    join_type: inner
+    relationship_columns:
+      - left_column: account_id
+        right_column: id
+  - left_table: account_movements
+    right_table: tags
+    join_type: left
+    relationship_columns:
+      - left_column: category_id
+        right_column: id
+  - left_table: credit_card_movements
+    right_table: credit_cards
+    join_type: inner
+    relationship_columns:
+      - left_column: credit_card_id
+        right_column: id
+  - left_table: credit_card_movements
+    right_table: tags
+    join_type: left
+    relationship_columns:
+      - left_column: category_id
+        right_column: id
+
+custom_instructions: |
+  - movement_direction = 'debit' means expense/outflow; 'credit' means income/inflow.
+  - To query all transactions across bank + credit card, UNION ALL account_movements and credit_card_movements.
+  - Always join to tags to get human-readable category names.
+  - Join account_movements to accounts for currency and account alias.
+  - Use DATE_TRUNC and EXTRACT for date grouping. Use interval arithmetic for relative dates.
+  - amount is always positive; use movement_direction to distinguish expenses from income.
+
+verified_queries:
+  - question: How much did I spend last month?
+    sql: |
+      SELECT SUM(am.amount) AS total_spent
+      FROM account_movements am
+      WHERE am.movement_direction = 'debit'
+        AND am.issued_at >= DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month')
+        AND am.issued_at < DATE_TRUNC('month', CURRENT_DATE)
+  - question: What are my top spending categories this year?
+    sql: |
+      SELECT t.name AS category, SUM(am.amount) AS total
+      FROM account_movements am
+      LEFT JOIN tags t ON am.category_id = t.id
+      WHERE am.movement_direction = 'debit'
+        AND am.issued_at >= DATE_TRUNC('year', CURRENT_DATE)
+      GROUP BY t.name
+      ORDER BY total DESC
+  - question: Show my monthly income for the last 6 months
+    sql: |
+      SELECT DATE_TRUNC('month', am.issued_at) AS month, SUM(am.amount) AS total_income
+      FROM account_movements am
+      WHERE am.movement_direction = 'credit'
+        AND am.issued_at >= CURRENT_DATE - INTERVAL '6 months'
+      GROUP BY DATE_TRUNC('month', am.issued_at)
+      ORDER BY month

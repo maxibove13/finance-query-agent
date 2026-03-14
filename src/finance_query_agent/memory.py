@@ -65,7 +65,7 @@ class ConversationMemory:
                     ", created_at = if_not_exists(created_at, :now)"
                     ", version = :new_version"
                 ),
-                ConditionExpression="attribute_not_exists(PK) OR version = :expected",
+                ConditionExpression="attribute_not_exists(PK) OR version = :expected OR attribute_not_exists(version)",
                 ExpressionAttributeValues={
                     ":uid": user_id,
                     ":msg": encrypted,

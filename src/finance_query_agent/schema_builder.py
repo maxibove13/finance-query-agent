@@ -1,7 +1,7 @@
 """Build the database schema context for the system prompt.
 
-Fetches the semantic model from SSM at cold start, then merges with live
-DB introspection. Result is cached across warm Lambda invocations.
+Reads the semantic model YAML from S3 at cold start. The YAML is the sole source
+of truth — no DB introspection. Result is cached across warm Lambda invocations.
 """
 
 from __future__ import annotations
@@ -12,23 +12,31 @@ from typing import Any
 import yaml
 
 from finance_query_agent.config import get_settings
-from finance_query_agent.connection import Connection
 
 logger = logging.getLogger(__name__)
 
-_AGENT_TABLES = ["accounts", "account_movements", "credit_card_movements", "credit_cards", "tags"]
-
-_SEMANTIC: dict[str, Any] | None = None  # populated once per cold start from SSM; update requires redeployment
+_SEMANTIC: dict[str, Any] | None = None  # populated once per cold start from S3; update requires redeployment
 
 _schema_context: str | None = None  # cached for the lifetime of the Lambda instance; update requires redeployment
 
 
 def _fetch_semantic() -> dict[str, Any]:
+    config = get_settings()
+    if config.semantic_model_local_path:
+        from pathlib import Path
+
+        result: dict[str, Any] = yaml.safe_load(Path(config.semantic_model_local_path).read_text())
+        return result
     import boto3  # type: ignore[import-untyped]
 
-    config = get_settings()
-    value = boto3.client("ssm").get_parameter(Name=config.semantic_model_ssm_path)["Parameter"]["Value"]
-    result: dict[str, Any] = yaml.safe_load(value)
+    if not config.semantic_model_s3_bucket:
+        raise ValueError("SEMANTIC_MODEL_S3_BUCKET must be set when semantic_model_local_path is not provided")
+    body = (
+        boto3.client("s3")
+        .get_object(Bucket=config.semantic_model_s3_bucket, Key=config.semantic_model_s3_key)["Body"]
+        .read()
+    )
+    result: dict[str, Any] = yaml.safe_load(body)  # type: ignore[no-redef]
     return result
 
 
@@ -39,68 +47,60 @@ def _get_semantic() -> dict[str, Any]:
     return _SEMANTIC
 
 
-async def get_schema_context(conn: Connection) -> str:
+def get_allowed_tables() -> frozenset[str]:
+    """Return the set of table names defined in the semantic model."""
+    semantic = _get_semantic()
+    return frozenset(t["name"] for t in semantic.get("tables", []))
+
+
+def get_schema_context() -> str:
     global _schema_context
     if _schema_context is None:
-        introspected = await _introspect(conn)
-        _schema_context = _render(_get_semantic(), introspected)
+        _schema_context = _render(_get_semantic())
     return _schema_context
 
 
-async def _introspect(conn: Connection) -> dict[str, list[dict[str, Any]]]:
-    rows = await conn.fetch(
-        """SELECT table_name, column_name, data_type, is_nullable
-           FROM information_schema.columns
-           WHERE table_schema = 'public' AND table_name = ANY($1)
-           ORDER BY table_name, ordinal_position""",
-        _AGENT_TABLES,
-    )
-    result: dict[str, list[dict[str, Any]]] = {}
-    for row in rows:
-        result.setdefault(row["table_name"], []).append(
-            {
-                "name": row["column_name"],
-                "data_type": row["data_type"],
-                "nullable": row["is_nullable"] == "YES",
-            }
-        )
-    return result
-
-
-def _render(semantic: dict[str, Any], introspected: dict[str, list[dict[str, Any]]]) -> str:
-    semantic_tables = {t["name"]: t for t in semantic.get("tables", [])}
+def _render(semantic: dict[str, Any]) -> str:
     lines: list[str] = []
     lines.append(f"description: {semantic['description']}")
     lines.append("")
     lines.append("tables:")
-    for table_name in _AGENT_TABLES:
-        sem_table = semantic_tables.get(table_name, {})
-        db_columns = introspected.get(table_name, [])
+    for table in semantic.get("tables", []):
+        table_name = table["name"]
         lines.append(f"  {table_name}:")
-        if desc := sem_table.get("description"):
+        if desc := table.get("description"):
             lines.append(f"    description: {desc}")
-        sem_cols: dict[str, dict[str, Any]] = {}
-        for group in ("dimensions", "time_dimensions", "facts"):
-            for col in sem_table.get(group, []):
-                sem_cols[col["name"]] = col
         lines.append("    columns:")
-        for col in db_columns:
-            col_name = col["name"]
-            sem = sem_cols.get(col_name, {})
-            nullable_note = ", nullable" if col["nullable"] else ""
-            line = f'      {col_name}: "{col["data_type"]}{nullable_note}'
-            if desc := sem.get("description"):
-                line += f" — {desc}"
-            if synonyms := sem.get("synonyms"):
-                line += f" [also: {', '.join(synonyms)}]"
-            if sem.get("is_enum") and (vals := sem.get("sample_values")):
-                line += f" [values: {', '.join(vals)}]"
-            lines.append(line + '"')
-        if metrics := sem_table.get("metrics"):
+        for group in ("dimensions", "time_dimensions", "facts"):
+            for col in table.get(group, []):
+                if col.get("access") == "private":
+                    continue
+                data_type = col.get("data_type", "unknown")
+                nullable_note = ", nullable" if col.get("nullable") else ""
+                line = f'      {col["name"]}: "{data_type}{nullable_note}'
+                if desc := col.get("description"):
+                    line += f" — {desc}"
+                if synonyms := col.get("synonyms"):
+                    line += f" [also: {', '.join(synonyms)}]"
+                if col.get("is_enum") and (vals := col.get("sample_values")):
+                    line += f" [values: {', '.join(vals)}]"
+                lines.append(line + '"')
+        if metrics := table.get("metrics"):
             lines.append("    metrics:")
             for m in metrics:
                 filt = f" WHERE {m['filter']['expr']}" if m.get("filter") else ""
-                lines.append(f"      {m['name']}: {m['expr']}{filt}  # {m.get('description', '')}")
+                non_additive = " [non-additive]" if m.get("non_additive") else ""
+                lines.append(f"      {m['name']}: {m['expr']}{filt}  # {m.get('description', '')}{non_additive}")
+    if filters := semantic.get("filters"):
+        lines.append("")
+        lines.append("filters:")
+        for f in filters:
+            synonyms_note = f"  # synonyms: {', '.join(f['synonyms'])}" if f.get("synonyms") else ""
+            desc_note = f" — {f['description']}" if f.get("description") else ""
+            requires_note = ""
+            if f.get("requires_join"):
+                requires_note = f"  # requires JOIN to {f['requires_join']}"
+            lines.append(f"  {f['name']}: {f['expr']}{desc_note}{synonyms_note}{requires_note}")
     lines.append("")
     lines.append("relationships:")
     for rel in semantic.get("relationships", []):

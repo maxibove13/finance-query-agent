@@ -22,7 +22,7 @@ Users of financial applications need to ask natural language questions about the
 - Provide a **deployed financial query service** (`finance-query-agent`) that any application with a financial database can integrate via HTTP.
 - Use **Pydantic AI** as the agent framework.
 - Implement a **text-to-SQL** architecture: the LLM writes SQL against a schema injected into the system prompt; a governance layer validates every query before execution.
-- **Schema documentation**: the DB schema, business rules, and example queries are built at cold start by `schema_builder.py` (fetched from SSM and merged with live DB introspection) and injected into the system prompt. No client-side adapter code required.
+- **Schema documentation**: the DB schema, business rules, and example queries are defined in a semantic model YAML stored in S3, fetched at cold start by `schema_builder.py` and injected into the system prompt. No DB introspection, no client-side adapter code required.
 
 ## 4. Non-Goals
 
@@ -37,7 +37,7 @@ MPI Lambda ──> boto3 invoke ──> Agent Lambda
                                  ├── Pydantic AI Agent
                                  │   └── execute_sql  (single SQL tool)
                                  ├── SQL Governance (validate_select_only)
-                                 ├── schema_builder.py (SSM semantic model + live DB introspection)
+                                 ├── schema_builder.py (S3 semantic model YAML)
                                  ├── asyncpg pool → RDS (read-only)
                                  ├── DynamoDB (encrypted conversation history)
                                  └── Logfire (PII-scrubbed traces)
@@ -49,7 +49,7 @@ MPI Lambda ──> boto3 invoke ──> Agent Lambda
 
 ## 6. Schema Documentation
 
-`schema_builder.py` builds the schema context injected into the system prompt on every invocation. At cold start it fetches the semantic model from SSM Parameter Store and merges it with live DB introspection. The result is cached for the lifetime of the Lambda instance. The semantic model documents:
+`schema_builder.py` builds the schema context injected into the system prompt on every invocation. At cold start it fetches the semantic model YAML from S3 (`semantic_model_s3_bucket` / `semantic_model_s3_key`). The YAML is the sole source of truth — no DB introspection. The result is cached for the lifetime of the Lambda instance. The semantic model documents:
 
 - Table names and their purpose
 - Column names and types
@@ -105,8 +105,12 @@ Configuration is via environment variables (set by Terraform):
 
 | Variable | Description |
 |----------|-------------|
-| `QUERY_MODEL` | Pydantic AI model string (default: `openai:gpt-4o`) |
+| `PRIMARY_MODEL` | Pydantic AI model string for query agent (default: `openai:gpt-4.1`) |
+| `SECONDARY_MODEL` | Model for visualization agent + history summarization (default: `openai:gpt-4.1-mini`) |
 | `DYNAMODB_TABLE` | DynamoDB table for conversation memory |
+| `AUDIT_TABLE` | DynamoDB table for SQL audit trail (optional; `None` = audit disabled) |
+| `SEMANTIC_MODEL_S3_BUCKET` | S3 bucket containing the semantic model YAML |
+| `SEMANTIC_MODEL_S3_KEY` | S3 key for the semantic model (default: `semantic-model.yaml`) |
 | `DB_CREDENTIALS_SECRET_ARN` | Secrets Manager ARN for DB credentials |
 | `ENCRYPTION_KEY_SECRET_ARN` | Secrets Manager ARN for Fernet key |
 | `LLM_API_KEY_SECRET_ARN` | Secrets Manager ARN for LLM API key |
@@ -124,9 +128,6 @@ The Lambda uses an `asyncpg` connection pool (min 1, max 5 connections) cached a
 class FinanceQueryError(Exception):
     """Base exception for all service errors."""
 
-class GovernanceError(FinanceQueryError):
-    """LLM-generated SQL failed governance validation."""
-
 class DatabaseConnectionError(FinanceQueryError):
     """Database connection error (creation, health, closure)."""
 
@@ -135,38 +136,16 @@ class QueryTimeoutError(FinanceQueryError):
 
 class LLMError(FinanceQueryError):
     """LLM API call failed (rate limit, auth, network, unexpected response)."""
+
+class ConversationConflictError(FinanceQueryError):
+    """Concurrent write detected: conversation was modified between load and save."""
 ```
+
+Note: SQL governance violations raise `ValueError`, which is caught and returned to the LLM as a `ModelRetry` so it can self-correct. There is no dedicated `GovernanceError` class.
 
 All exceptions inherit from `FinanceQueryError` so consumers can catch broadly or narrowly.
 
-### 8.2 Hooks
-
-**`pre_llm_hook`** — Called before tool results are sent back to the LLM. Use for PII redaction.
-
-```python
-class PreLlmHookContext:
-    tool_name: str
-    tool_results: list[dict]     # The rows about to be sent to the LLM
-
-# Return a modified PreLlmHookContext. The service sends the returned version to the LLM.
-# Must be synchronous. Must not raise — if it does, the tool call fails.
-```
-
-**`on_tool_call`** — Called after each tool execution completes. Use for tracing (Langfuse, OpenTelemetry, etc.).
-
-```python
-class ToolCallEvent:
-    tool_name: str
-    parameters: dict
-    execution_time_ms: int
-    row_count: int
-    success: bool
-    error: str | None
-
-# Fire-and-forget. Must be synchronous. Exceptions are logged and swallowed.
-```
-
-### 8.3 System Prompt Requirements
+### 8.2 System Prompt Requirements
 
 The default system prompt MUST:
 - Identify the agent as a financial data assistant.
@@ -178,17 +157,17 @@ The default system prompt MUST:
 - Instruct the LLM to ask clarifying questions when the user's query is ambiguous.
 - Instruct the LLM to format monetary values with currency symbols and two decimal places.
 - Instruct the LLM to never fabricate data — if a tool returns empty results, say so.
-- Be fully replaceable via `system_prompt_override`.
 
 ## 9. Response Format
 
 ```python
 class AgentResponse(BaseModel):
-    answer: str                          # Natural language answer
-    tool_calls: list[ToolCallRecord]     # Which tools were used, with params
-    unresolved: bool                     # True if the agent couldn't answer
+    answer: str                                        # Natural language answer
+    tool_calls: list[ToolCallRecord]                   # Which tools were used, with params
+    visualizations: list[VegaLiteChart] | None = None  # Vega-Lite v5 chart specs (null if text-only)
+    unresolved: bool                                   # True if the agent couldn't answer
     original_question: str
-    token_usage: TokenUsage              # LLM token consumption
+    token_usage: TokenUsage                            # LLM token consumption
 
 class ToolCallRecord(BaseModel):
     tool_name: str
@@ -199,15 +178,37 @@ class ToolCallRecord(BaseModel):
 class TokenUsage(BaseModel):
     input_tokens: int
     output_tokens: int
+
+class VegaLiteChart(BaseModel):
+    spec: dict[str, Any]  # Full Vega-Lite v5 JSON spec
 ```
 
 The consuming application decides how to present this to the user (chat UI, API response, etc.).
+
+### 9.1 Agent Output Types
+
+The query agent returns a **union** result type that determines whether visualization runs:
+
+```python
+AgentOutput = TextAnswer | AnswerWithVisualization
+```
+
+- **`TextAnswer`** — text-only response, no visualization agent runs.
+- **`AnswerWithVisualization`** — triggers the visualization agent if the tool results contain ≥ 2 data rows. The visualization agent (running on `secondary_model`) produces `ChartIntent` objects which are converted to full Vega-Lite v5 specs by `vega_builder.py`.
+
+Supported chart types: `bar`, `line`, `pie`, `area`, `scatter`, `heatmap`, `stacked_bar`, `grouped_bar`.
 
 ## 10. Multi-Currency Behavior
 
 Financial data often spans multiple currencies. The LLM is aware of this via the schema documentation and is instructed to present multi-currency results clearly (e.g., "You spent $1,200 USD and $45,000 UYU on groceries last month"). The `execute_sql` tool returns raw per-transaction currency values; the LLM formats and groups them in the answer.
 
-## 11. Security Requirements
+## 11. Conversation Memory & History Summarization
+
+Conversation history is stored in DynamoDB (`memory.py`), encrypted at rest with Fernet (`encryption.py`). Each request loads, decrypts, appends, optionally summarizes, re-encrypts, and saves the history.
+
+**History summarization** (`history.py`): When conversation history exceeds 20 messages, older messages (except the most recent 6) are summarized by the `secondary_model` into a 3-5 sentence summary. The summary preserves questions asked, time periods, key totals, and categories discussed while omitting verbose tool output. Tool call/response pairs are kept intact (never split mid-pair). Prior summaries are replaced rather than re-summarized.
+
+## 12. Security Requirements
 
 | Requirement | Description |
 |-------------|-------------|
@@ -215,44 +216,53 @@ Financial data often spans multiple currencies. The LLM is aware of this via the
 | **S2 — No credential exposure** | The `database_url` is resolved from Secrets Manager at runtime. The service never logs or transmits connection strings. |
 | **S3 — Read-only** | No tool can modify data. Enforced at DB role level (the security boundary) and reinforced by the SQL governance layer (SELECT-only enforcement). |
 | **S4 — Input sanitization** | All queries use parameterized values (`$1`, `$2`, etc.). The governance layer validates SQL structure before execution (AST-level SELECT-only check, LIMIT auto-enforced to max 200 rows, no CROSS JOIN, no `set_config()`), followed by an `EXPLAIN` pre-flight in a readonly transaction. |
-| **S5 — PII in LLM context** | Transaction descriptions sent to the LLM may contain PII (merchant names, amounts). The consuming application is responsible for PII handling policy via the `pre_llm_hook`. |
+| **S5 — PII in LLM context** | Transaction descriptions sent to the LLM may contain PII (merchant names, amounts). The service redacts PII in audit logs (`redaction.py`) and Logfire traces. |
 
-## 12. Observability Requirements
+## 13. Observability Requirements
 
 | Requirement | Description |
 |-------------|-------------|
 | **O1 — Structured logging** | All tool invocations logged with: tool name, parameters, execution time, result row count, success/failure. Uses Python `logging` — no proprietary logging. |
 | **O2 — Unresolved query log** | Queries the agent couldn't answer are logged for coverage analysis. |
-| **O3 — Tracing hooks** | `on_tool_call` callback fires after each tool execution with a `ToolCallEvent`. Synchronous, fire-and-forget, exceptions swallowed. The consuming application bridges this to Langfuse/OpenTelemetry/etc. |
+| **O3 — SQL audit trail** | Every invocation is logged to a DynamoDB audit table (`audit.py`) with PII-redacted SQL queries, row counts, timing, token usage, retry detection, and empty result flags. 90-day TTL. Enabled when `AUDIT_TABLE` is set. |
 | **O4 — Cost tracking** | `AgentResponse.token_usage` contains input/output token counts from the LLM call. |
+| **O5 — Logfire tracing** | `observability.py` initializes Logfire with a custom scrubbing callback for PII-safe traces. |
 
-## 13. Repository Structure
+## 14. Repository Structure
 
 ```
 finance-query-agent/
 ├── src/
 │   └── finance_query_agent/
-│       ├── __init__.py               <- Package exports and exceptions
-│       ├── agent.py                  <- Pydantic AI agent definition + system prompt
+│       ├── __init__.py               <- Package exports
+│       ├── handler.py                <- Lambda entry point
+│       ├── agent.py                  <- Query agent definition + system prompt
+│       ├── visualization.py          <- Visualization agent (Vega-Lite chart generation)
+│       ├── vega_builder.py           <- ChartIntent → full Vega-Lite v5 spec
+│       ├── config.py                 <- Settings from env vars + Secrets Manager
 │       ├── sql_governance.py         <- validate_select_only + cap_limit (governance pipeline)
-│       ├── schema_builder.py         <- schema context builder (SSM semantic model + live DB introspection)
+│       ├── schema_builder.py         <- Schema context builder (S3 semantic model YAML)
 │       ├── connection.py             <- asyncpg pool, warm-cached across Lambda invocations
+│       ├── memory.py                 <- DynamoDB conversation history
+│       ├── audit.py                  <- DynamoDB SQL audit logging
+│       ├── encryption.py             <- Fernet field encryption
+│       ├── redaction.py              <- Regex PII scrubbing
+│       ├── history.py                <- Conversation summarization (LLM-based)
+│       ├── observability.py          <- Logfire initialization
+│       ├── exceptions.py             <- Exception hierarchy
 │       ├── tools/
 │       │   └── sql.py                <- execute_sql tool + asyncpg type normalization
 │       └── schemas/
-│           ├── charts.py             <- Chart specs (pie, bar, line, grouped_bar)
+│           ├── charts.py             <- ChartIntent + VegaLiteChart models
 │           └── responses.py          <- AgentResponse, ToolCallRecord, TokenUsage
 ├── tests/
-│   ├── test_governance.py            <- Unit tests for SQL governance rules
-│   ├── test_tools/
-│   ├── test_agent.py
-│   └── conftest.py
+├── terraform/
 ├── pyproject.toml
 ├── LICENSE                           <- MIT
 └── README.md
 ```
 
-## 14. Integration with my_personal_incomes_ai
+## 15. Integration with my_personal_incomes_ai
 
 The consuming app deploys the finance-query-agent as an AWS Lambda via the Terraform module. MPI's backend invokes the agent Lambda directly via `boto3.client('lambda').invoke()`.
 
@@ -284,20 +294,20 @@ async def query_agent(user_id: int, session_id: str, question: str) -> dict:
     return json.loads(response["Payload"].read())
 ```
 
-## 15. Design Decisions & Clarifications
+## 16. Design Decisions & Clarifications
 
-### 15.1 Connection Pool Model
+### 16.1 Connection Pool Model
 
 The service uses an `asyncpg` connection pool (min 1, max 5) cached at module level across warm Lambda invocations. On cold start the pool is created; on warm invocations it is reused, with stale pools (loop mismatch) detected and replaced. DB credentials are resolved from Secrets Manager on cold start and cached via `lru_cache`.
 
-### 15.2 Governance Error Recovery
+### 16.2 Governance Error Recovery
 
 When `validate_select_only` rejects a query, the error is returned to the LLM as a tool call failure with a description of the rule that was violated. The LLM can retry with a corrected query. This is intentional — the LLM learns within the conversation what constraints it must respect.
 
-### 15.3 User Isolation via RLS
+### 16.3 User Isolation via RLS
 
 User scoping is enforced by PostgreSQL Row Level Security. Before executing a query the service sets `app.user_id` as a session variable (`SET LOCAL app.user_id = $1`) inside a readonly transaction. RLS policies on each table filter rows to the current user. The LLM is instructed to omit `user_id` conditions; even if it includes one, RLS enforces the correct boundary independently.
 
-## 16. Open Questions
+## 17. Open Questions
 
 1. **Currency handling:** The service returns per-currency results from raw queries. Should the LLM present all currencies, or should the system prompt instruct it to highlight the "primary" currency? If so, how is primary currency determined?

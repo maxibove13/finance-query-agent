@@ -274,15 +274,16 @@ class TestProcessRequest:
 
         mocks["agent"].run = AsyncMock(side_effect=_run_with_results)
 
-        from finance_query_agent.schemas.charts import PieChartSpec
+        from finance_query_agent.schemas.charts import VegaLiteChart
 
-        chart = PieChartSpec(
-            title="Test",
-            currency="USD",
-            slices=[
-                {"label": "A", "value": 60.0, "percentage": 60.0},
-                {"label": "B", "value": 40.0, "percentage": 40.0},
-            ],
+        chart = VegaLiteChart(
+            spec={
+                "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+                "title": "Test",
+                "mark": "bar",
+                "data": {"values": [{"x": "A", "y": 60}, {"x": "B", "y": 40}]},
+                "encoding": {"x": {"field": "x"}, "y": {"field": "y"}},
+            }
         )
 
         with ExitStack() as stack:

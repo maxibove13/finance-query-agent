@@ -39,3 +39,14 @@ variable "authorized_caller_arns" {
   type    = list(string)
   default = []
 }
+
+# Semantic model
+variable "semantic_model_s3_bucket" {
+  type        = string
+  description = "S3 bucket containing the semantic model YAML"
+}
+
+variable "semantic_model_s3_key" {
+  type    = string
+  default = "semantic-model.yaml"
+}

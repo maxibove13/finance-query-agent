@@ -17,7 +17,7 @@ graph LR
     QUERY_AGENT -->|"AnswerWithVisualization"| VIZ_AGENT
 
     subgraph VIZ_AGENT["Visualization Agent"]
-        VIZ_OUT["pie · bar · line · grouped_bar"]
+        VIZ_OUT["bar · line · pie · area · scatter<br/>heatmap · stacked_bar · grouped_bar"]
     end
 
     VIZ_AGENT --> OUT_VIZ["Text + Chart Specs"]
@@ -142,11 +142,11 @@ graph LR
 
 ## Query Generation Pipeline
 
-The LLM generates SQL against a documented schema. The schema context is built at cold start by `schema_builder.py` — fetching the semantic model from SSM and merging it with live DB introspection — then injected into the system prompt on every request. The governance layer (`validate_select_only` + `cap_limit`) validates the LLM-generated SQL before execution: enforcing SELECT-only, auto-capping LIMIT to 200 rows, blocking dangerous patterns (CROSS JOIN, `set_config()`). An `EXPLAIN` pre-flight then validates the query against the live schema in a readonly transaction before any data is read. User scoping is enforced by PostgreSQL RLS via `app.user_id` session variable set by the service.
+The LLM generates SQL against a documented schema. The schema context is built at cold start by `schema_builder.py` — fetching the semantic model YAML from S3 — then injected into the system prompt on every request. The governance layer (`validate_select_only` + `cap_limit`) validates the LLM-generated SQL before execution: enforcing SELECT-only, auto-capping LIMIT to 200 rows, blocking dangerous patterns (CROSS JOIN, `set_config()`). An `EXPLAIN` pre-flight then validates the query against the live schema in a readonly transaction before any data is read. User scoping is enforced by PostgreSQL RLS via `app.user_id` session variable set by the service.
 
 ```mermaid
 graph LR
-    SY["schema_builder.py<br/>(SSM semantic model<br/>+ live DB introspection)"] --> SP[System Prompt]
+    SY["schema_builder.py<br/>(S3 semantic model YAML)"] --> SP[System Prompt]
     SP --> LLM[LLM]
     LLM --> SQL["LLM-generated SQL"]
 
@@ -240,7 +240,7 @@ graph TB
 
 ## Schema Configuration
 
-`schema_builder.py` builds the schema context injected into the system prompt on every invocation. At cold start it fetches the semantic model (tables, columns, business rules, example queries) from SSM Parameter Store, then merges it with live DB introspection. The result is cached for the lifetime of the Lambda instance. No client-side configuration is required.
+`schema_builder.py` builds the schema context injected into the system prompt on every invocation. At cold start it fetches the semantic model YAML (tables, columns, business rules, example queries) from S3. The YAML is the sole source of truth — no DB introspection. The result is cached for the lifetime of the Lambda instance. No client-side configuration is required.
 
 ## Invocation
 
@@ -262,10 +262,11 @@ Response:
   "tool_calls": [...],
   "visualizations": [
     {
-      "chart_type": "pie",
-      "title": "Spending by Category (USD)",
-      "currency": "USD",
-      "slices": [{"label": "Groceries", "value": 235.50, "percentage": 42.1}, ...]
+      "spec": {
+        "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+        "mark": "arc",
+        "encoding": { "..." : "..." }
+      }
     }
   ],
   "unresolved": false,
@@ -274,7 +275,7 @@ Response:
 }
 ```
 
-`visualizations` is `null` when the query agent returns `TextAnswer` or the data isn't chartable. Chart types: `pie`, `bar`, `line`, `grouped_bar`.
+`visualizations` is `null` when the query agent returns `TextAnswer` or the data isn't chartable. Chart types: `bar`, `line`, `pie`, `area`, `scatter`, `heatmap`, `stacked_bar`, `grouped_bar`.
 
 ## Project Structure
 
@@ -285,7 +286,9 @@ src/finance_query_agent/
 ├── visualization.py        Visualization agent (chart spec generation)
 ├── config.py               Settings from env vars
 ├── sql_governance.py       SQL validation (SELECT-only, LIMIT cap, CROSS JOIN / set_config blocking)
-├── schema_builder.py       Schema context builder (SSM semantic model + live DB introspection)
+├── schema_builder.py       Schema context builder (S3 semantic model YAML)
+├── audit.py                DynamoDB SQL audit logging (PII-redacted, 90-day TTL)
+├── vega_builder.py         Vega-Lite spec builder (ChartIntent → full spec)
 ├── connection.py           asyncpg pool, warm-cached across Lambda invocations
 ├── memory.py               DynamoDB conversation history
 ├── encryption.py           Fernet field encryption
@@ -296,8 +299,8 @@ src/finance_query_agent/
 ├── tools/
 │   └── sql.py              execute_sql tool + asyncpg type normalization
 └── schemas/
-    ├── charts.py           Chart specs (pie, bar, line, grouped_bar)
-    └── responses.py        AgentResponse, AgentOutput, ChartSpec
+    ├── charts.py           ChartIntent + VegaLiteChart models
+    └── responses.py        AgentResponse, AgentOutput, ToolCallRecord, TokenUsage
 ```
 
 ## Development

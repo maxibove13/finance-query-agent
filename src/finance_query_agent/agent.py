@@ -48,7 +48,7 @@ def get_agent(model: str | Model) -> Agent[AgentDeps, AgentOutput]:
 
     @agent.system_prompt(dynamic=True)
     async def system_prompt(ctx: RunContext[AgentDeps]) -> str:
-        schema = await get_schema_context(ctx.deps.connection)
+        schema = get_schema_context()
         return build_system_prompt(schema)
 
     _agents[key] = agent
@@ -77,11 +77,15 @@ Respond in the same language the user writes in.
 - Join account_movements to accounts to get currency and account name.
 - Join either movements table to tags to get category name.
 - Use DATE_TRUNC, EXTRACT, and interval arithmetic for date grouping and filtering.
+- Named filters in the schema (under "filters:") are verified WHERE fragments —
+  use them when the user asks about the corresponding concept.
 
 ## Behavior
 
 - Write a single SQL query, call execute_sql once, then answer based on the results.
-- For period comparisons, call execute_sql twice with different date ranges.
+- For period comparisons, write a single query that labels each period
+  (e.g., CASE WHEN issued_at >= '2026-02-01' THEN 'This Month' ELSE 'Last Month' END AS period)
+  so the visualization agent can group by the label column.
 - If the query returns no rows, say so. Never fabricate data.
 - Format monetary values with two decimal places and the currency code from the results.
 - If the question is ambiguous, ask a clarifying question instead of guessing.

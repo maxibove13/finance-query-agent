@@ -12,8 +12,9 @@ import logfire
 from pydantic_ai import ModelRetry, RunContext
 
 from finance_query_agent.exceptions import DatabaseConnectionError
+from finance_query_agent.schema_builder import get_allowed_tables
 from finance_query_agent.schemas.responses import ToolCallRecord
-from finance_query_agent.sql_governance import cap_limit, validate_select_only
+from finance_query_agent.sql_governance import cap_limit, validate_allowed_tables, validate_select_only
 from finance_query_agent.tools import AgentDeps
 
 
@@ -39,6 +40,7 @@ async def execute_sql(ctx: RunContext[AgentDeps], sql: str) -> list[dict[str, An
     """
     try:
         validate_select_only(sql)
+        validate_allowed_tables(sql, get_allowed_tables())
     except ValueError as exc:
         raise ModelRetry(str(exc)) from exc
 
