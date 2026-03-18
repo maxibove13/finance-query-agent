@@ -6,7 +6,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from finance_query_agent.schemas.charts import ChartSpec
+from finance_query_agent.schemas.charts import VegaLiteChart
 
 
 class TextAnswer(BaseModel):
@@ -39,7 +39,7 @@ class TokenUsage(BaseModel):
 class AgentResponse(BaseModel):
     answer: str
     tool_calls: list[ToolCallRecord]
-    visualizations: list[ChartSpec] | None = None
+    visualizations: list[VegaLiteChart] | None = None
     unresolved: bool
     original_question: str
     token_usage: TokenUsage

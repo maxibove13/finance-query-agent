@@ -17,6 +17,8 @@ from pydantic_ai.messages import (
 from finance_query_agent.history import (
     KEEP_RECENT,
     SUMMARIZE_THRESHOLD,
+    SUMMARY_MARKER,
+    _is_summary_message,
     _is_tool_message,
     summarize_history,
 )
@@ -39,16 +41,27 @@ def _make_tool_return_msg() -> ModelRequest:
 
 
 def _mock_summarizer():
-    """Create a mock summarizer agent that returns summary messages."""
-    summary_messages = [
-        _make_user_msg("Summarize the conversation above."),
-        _make_assistant_msg("Summary of the conversation."),
-    ]
+    """Create a mock summarizer agent that returns a summary string via .output."""
     mock_result = MagicMock()
-    mock_result.new_messages.return_value = summary_messages
+    mock_result.output = "Summary of the conversation."
     mock_agent = MagicMock()
     mock_agent.run = AsyncMock(return_value=mock_result)
     return mock_agent
+
+
+def _make_summary_msg() -> ModelResponse:
+    return ModelResponse(parts=[TextPart(content=f"{SUMMARY_MARKER}\nPrior summary text.")])
+
+
+class TestIsSummaryMessage:
+    def test_summary_message_detected(self):
+        assert _is_summary_message(_make_summary_msg()) is True
+
+    def test_plain_assistant_message_is_not_summary(self):
+        assert _is_summary_message(_make_assistant_msg("hello")) is False
+
+    def test_user_message_is_not_summary(self):
+        assert _is_summary_message(_make_user_msg("hello")) is False
 
 
 class TestIsToolMessage:
@@ -86,9 +99,27 @@ class TestSummarizeHistory:
         with patch("finance_query_agent.history._get_summarizer", return_value=mock_agent):
             result = await summarize_history(messages)
 
-        # 2 summary messages + KEEP_RECENT kept
-        assert len(result) == 2 + KEEP_RECENT
+        # 1 synthetic summary message + KEEP_RECENT kept
+        assert len(result) == 1 + KEEP_RECENT
         mock_agent.run.assert_called_once()
+
+    @pytest.mark.anyio
+    async def test_summarization_does_not_leak_prompt_into_history(self):
+        """The 'Summarize the conversation above.' prompt must not appear in persisted history."""
+        messages = [_make_user_msg(f"msg {i}") for i in range(SUMMARIZE_THRESHOLD + 5)]
+
+        mock_agent = _mock_summarizer()
+        with patch("finance_query_agent.history._get_summarizer", return_value=mock_agent):
+            result = await summarize_history(messages)
+
+        all_text = " ".join(
+            part.content
+            for msg in result
+            for part in getattr(msg, "parts", [])
+            if hasattr(part, "content") and isinstance(part.content, str)
+        )
+        assert "Summarize the conversation above" not in all_text
+        assert SUMMARY_MARKER in all_text
 
     @pytest.mark.anyio
     async def test_respects_tool_call_pairs(self):
@@ -105,6 +136,26 @@ class TestSummarizeHistory:
             result = await summarize_history(messages)
 
         assert len(result) >= KEEP_RECENT
+
+    @pytest.mark.anyio
+    async def test_prior_summary_not_re_summarized(self):
+        """A prior synthetic summary at the front is stripped before the LLM call,
+        so the summarizer only sees real messages added since the last compaction."""
+        prior_summary = _make_summary_msg()
+        new_msgs = [_make_user_msg(f"new {i}") for i in range(SUMMARIZE_THRESHOLD)]
+        messages = [prior_summary] + new_msgs
+
+        mock_agent = _mock_summarizer()
+        with patch("finance_query_agent.history._get_summarizer", return_value=mock_agent):
+            result = await summarize_history(messages)
+
+        # Summarizer must have been called with only the real messages, not the prior summary.
+        call_history = mock_agent.run.call_args.kwargs["message_history"]
+        assert not any(_is_summary_message(m) for m in call_history)
+
+        # Result still begins with exactly one summary marker.
+        summary_msgs = [m for m in result if _is_summary_message(m)]
+        assert len(summary_msgs) == 1
 
     @pytest.mark.anyio
     async def test_all_tool_messages_returns_unchanged(self):

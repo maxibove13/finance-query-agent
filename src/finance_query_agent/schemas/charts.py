@@ -1,72 +1,26 @@
-"""Chart specification models for visualization agent output."""
+"""Chart intent and Vega-Lite chart models."""
 
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
-
-
-class PieSlice(BaseModel):
-    label: str
-    value: float
-    percentage: float = 0.0  # computed by PieChartSpec validator; not from LLM
+from pydantic import BaseModel
 
 
-class PieChartSpec(BaseModel):
-    chart_type: Literal["pie"] = "pie"
+class ChartIntent(BaseModel):
+    """Simplified chart intent — what the LLM outputs."""
+
+    chart_type: Literal["bar", "line", "pie", "area", "scatter", "heatmap", "stacked_bar", "grouped_bar"]
     title: str
-    currency: str
-    slices: list[PieSlice]
-
-    @model_validator(mode="after")
-    def compute_percentages(self) -> PieChartSpec:
-        total = sum(s.value for s in self.slices)
-        if total > 0:
-            for s in self.slices:
-                s.percentage = round(s.value / total * 100, 2)
-        return self
+    currency: str | None = None
+    x_field: str
+    y_field: str
+    color_field: str | None = None
+    sort: Literal["ascending", "descending", "none"] = "none"
+    series_labels: list[str] | None = None
 
 
-class BarItem(BaseModel):
-    label: str
-    value: float
+class VegaLiteChart(BaseModel):
+    """Wrapper around a full Vega-Lite v5 JSON spec."""
 
-
-class BarChartSpec(BaseModel):
-    chart_type: Literal["bar"] = "bar"
-    title: str
-    currency: str
-    bars: list[BarItem]
-
-
-class LinePoint(BaseModel):
-    label: str
-    value: float
-
-
-class LineChartSpec(BaseModel):
-    chart_type: Literal["line"] = "line"
-    title: str
-    currency: str
-    points: list[LinePoint]
-
-
-class GroupedBarItem(BaseModel):
-    label: str
-    value_a: float
-    value_b: float
-
-
-class GroupedBarChartSpec(BaseModel):
-    chart_type: Literal["grouped_bar"] = "grouped_bar"
-    title: str
-    currency: str
-    groups: list[GroupedBarItem]
-    series_labels: list[str] = Field(min_length=2, max_length=2)
-
-
-ChartSpec = Annotated[
-    PieChartSpec | BarChartSpec | LineChartSpec | GroupedBarChartSpec,
-    Field(discriminator="chart_type"),
-]
+    spec: dict[str, Any]

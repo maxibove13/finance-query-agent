@@ -7,7 +7,6 @@ import logging
 import time
 from typing import TYPE_CHECKING, Any
 
-from finance_query_agent.exceptions import SchemaValidationError
 from finance_query_agent.redaction import sanitize_error
 
 if TYPE_CHECKING:
@@ -45,9 +44,6 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     except ValueError as e:
         logger.warning("Invalid input: %s", e)
         return {"error": f"Invalid input: {e}"}
-    except SchemaValidationError as e:
-        logger.error("Schema config does not match database: %s", e)
-        return {"error": "schema_mismatch", "message": str(e)}
     except Exception as e:
         logger.exception("Agent request failed")
         return {"error": sanitize_error(e)}
@@ -58,15 +54,12 @@ async def _process_request(body: dict[str, Any]) -> AgentResponse:
     global _initialized  # noqa: PLW0603
 
     from finance_query_agent.agent import get_agent
-    from finance_query_agent.config import get_settings, load_schema_json
+    from finance_query_agent.config import get_settings
     from finance_query_agent.connection import Connection
     from finance_query_agent.encryption import FieldEncryptor
     from finance_query_agent.memory import ConversationMemory
-    from finance_query_agent.query_builder import QueryBuilder
-    from finance_query_agent.schemas.mapping import SchemaMapping
     from finance_query_agent.schemas.responses import AgentResponse, TokenUsage
     from finance_query_agent.tools import AgentDeps
-    from finance_query_agent.validation.schema_validator import validate_schema
 
     request_start = time.monotonic()
 
@@ -84,13 +77,24 @@ async def _process_request(body: dict[str, Any]) -> AgentResponse:
         raise ValueError(f"question exceeds maximum length of {settings.max_question_length} characters")
     if not isinstance(session_id, str) or not session_id.strip():
         raise ValueError("session_id must be a non-empty string")
+    session_id = session_id.strip()
     if len(session_id) > settings.max_session_id_length:
         raise ValueError(f"session_id exceeds maximum length of {settings.max_session_id_length} characters")
 
-    if not _initialized:
-        from finance_query_agent.observability import initialize
-
-        _initialized = initialize()
+    # user_id must be a positive integer (int or numeric string)
+    if isinstance(raw_user_id, bool):
+        raise ValueError("user_id must be an integer or string, got bool")
+    if isinstance(raw_user_id, int):
+        int_user_id: int = raw_user_id
+        if int_user_id <= 0:
+            raise ValueError(f"user_id must be a positive integer, got {int_user_id}")
+        user_id: int | str = int_user_id
+    elif isinstance(raw_user_id, str) and raw_user_id.isdigit():
+        user_id = int(raw_user_id)
+        if user_id <= 0:
+            raise ValueError(f"user_id must be a positive integer, got {user_id}")
+    else:
+        raise ValueError(f"user_id must be a positive integer, got {raw_user_id!r}")
 
     encryptor = FieldEncryptor(settings.encryption_key)
     memory = ConversationMemory(settings.dynamodb_table, settings.dynamodb_region, encryptor)
@@ -100,36 +104,27 @@ async def _process_request(body: dict[str, Any]) -> AgentResponse:
     try:
         await conn.connect()
 
-        # Load and validate schema
-        schema_data = load_schema_json(settings)
-        schema = SchemaMapping(**schema_data)
-        type_info = await validate_schema(schema, conn)
+        if not _initialized:
+            from finance_query_agent.observability import initialize
 
-        # Cast user_id based on discovered DB column type
-        if type_info.user_id_type in ("int2", "int4", "int8", "integer", "bigint", "smallint"):
-            if isinstance(raw_user_id, int) and not isinstance(raw_user_id, bool):
-                user_id = raw_user_id
-            elif isinstance(raw_user_id, str) and raw_user_id.isdigit():
-                user_id = int(raw_user_id)
-            else:
-                raise ValueError(f"user_id must be an integer, got {type(raw_user_id).__name__}: {raw_user_id!r}")
-            if user_id <= 0:
-                raise ValueError(f"user_id must be a positive integer, got {user_id}")
-        else:
-            if not isinstance(raw_user_id, str) or not raw_user_id.strip():
-                raise ValueError("user_id must be a non-empty string")
-            user_id = raw_user_id  # type: ignore[assignment]
+            initialize()
+            # tags is intentionally excluded: it is shared reference data (global taxonomy),
+            # not tenant-scoped. All user-owned tables are listed here.
+            await conn.verify_rls_enabled(
+                ["accounts", "credit_cards", "account_movements", "credit_card_movements"],
+                strict=settings.aws_lambda_function_name is not None,
+            )
+            _initialized = True
 
-        # Load conversation history (DynamoDB always uses string keys)
-        history = await memory.load_history(str(raw_user_id), session_id)
+        # Load conversation history (DynamoDB always uses string keys; use normalized int)
+        history, history_version = await memory.load_history(str(user_id), session_id)
 
         # Run agent
         from pydantic_ai import UsageLimits
         from pydantic_ai.exceptions import UsageLimitExceeded
         from pydantic_ai.settings import ModelSettings
 
-        qb = QueryBuilder(schema)
-        deps = AgentDeps(connection=conn, query_builder=qb, schema=schema, user_id=user_id)
+        deps = AgentDeps(connection=conn, user_id=user_id)
         agent = get_agent(settings.primary_model)
 
         usage_limits = UsageLimits(request_limit=settings.agent_request_limit)
@@ -148,6 +143,22 @@ async def _process_request(body: dict[str, Any]) -> AgentResponse:
             )
         except (TimeoutError, UsageLimitExceeded) as exc:
             logger.warning("Agent execution capped: %s", exc)
+            if settings.audit_table:
+                try:
+                    from finance_query_agent.audit import SqlAudit
+
+                    audit = SqlAudit(settings.audit_table, settings.dynamodb_region)
+                    await audit.write_invocation(
+                        user_id=str(user_id),
+                        session_id=session_id,
+                        question=question,
+                        tool_calls=deps.tool_calls,
+                        token_usage=TokenUsage(input_tokens=0, output_tokens=0),
+                        total_ms=int((time.monotonic() - request_start) * 1000),
+                        unresolved=True,
+                    )
+                except Exception:
+                    logger.warning("Audit write failed", exc_info=True)
             return AgentResponse(
                 answer=(
                     "I wasn't able to fully process your question within the time limit."
@@ -159,8 +170,36 @@ async def _process_request(body: dict[str, Any]) -> AgentResponse:
                 token_usage=TokenUsage(input_tokens=0, output_tokens=0),
             )
 
-        # Store updated conversation (DynamoDB always uses string keys)
-        await memory.save_history(str(raw_user_id), session_id, result.all_messages())
+        # Store updated conversation (DynamoDB always uses string keys; use normalized int)
+        from finance_query_agent.exceptions import ConversationConflictError
+
+        try:
+            await memory.save_history(str(user_id), session_id, result.all_messages(), history_version)
+        except ConversationConflictError:
+            logger.warning("Conversation conflict | user=%s session=%s", user_id, session_id)
+            raise
+
+        usage = result.usage()
+
+        if settings.audit_table:
+            try:
+                from finance_query_agent.audit import SqlAudit
+
+                audit = SqlAudit(settings.audit_table, settings.dynamodb_region)
+                await audit.write_invocation(
+                    user_id=str(user_id),
+                    session_id=session_id,
+                    question=question,
+                    tool_calls=deps.tool_calls,
+                    token_usage=TokenUsage(
+                        input_tokens=usage.input_tokens or 0,
+                        output_tokens=usage.output_tokens or 0,
+                    ),
+                    total_ms=int((time.monotonic() - request_start) * 1000),
+                    unresolved=not deps.tool_calls,
+                )
+            except Exception:
+                logger.warning("Audit write failed", exc_info=True)
 
         # Agent-decided visualization with programmatic guardrails
         from finance_query_agent.schemas.responses import AnswerWithVisualization
@@ -187,7 +226,6 @@ async def _process_request(body: dict[str, Any]) -> AgentResponse:
                     logger.warning("Visualization timed out (budget=%.1fs)", viz_budget)
 
         # Build response
-        usage = result.usage()
         return AgentResponse(
             answer=answer_text,
             tool_calls=deps.tool_calls,

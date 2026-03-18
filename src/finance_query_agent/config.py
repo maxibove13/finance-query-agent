@@ -6,8 +6,7 @@ import json
 import logging
 import os
 from functools import lru_cache
-from pathlib import Path
-from typing import Any
+from urllib.parse import quote_plus
 
 from pydantic_settings import BaseSettings
 
@@ -20,9 +19,7 @@ class Settings(BaseSettings):
     secondary_model: str = "openai:gpt-4.1-mini"
     dynamodb_table: str = "finance_agent_conversations"
     dynamodb_region: str = "us-east-1"
-    schema_config_json: str | None = None  # inline JSON
-    schema_config_path: str | None = None  # path to JSON file
-    schema_config_ssm_param: str | None = None  # SSM parameter name (set via Lambda env var)
+    audit_table: str | None = None  # None = audit disabled
     encryption_key: str | None = None  # Fernet key (required in prod)
     logfire_token: str | None = None
     aws_lambda_function_name: str | None = None  # auto-set by Lambda
@@ -42,9 +39,12 @@ class Settings(BaseSettings):
     encryption_key_secret_arn: str | None = None
     llm_api_key_secret_arn: str | None = None
     logfire_token_secret_arn: str | None = None
+    semantic_model_s3_bucket: str | None = None  # S3 bucket containing the semantic model YAML
+    semantic_model_s3_key: str = "semantic-model.yaml"  # S3 key for the semantic model
+    semantic_model_local_path: str | None = None  # local YAML file path (for dev/test, overrides S3)
 
     def resolve_secrets(self) -> None:
-        """Fetch secrets from AWS Secrets Manager and SSM Parameter Store."""
+        """Fetch secrets from AWS Secrets Manager."""
         has_arns = any(
             [
                 self.db_credentials_secret_arn,
@@ -58,7 +58,7 @@ class Settings(BaseSettings):
                 raw = _resolve_secret(self.db_credentials_secret_arn)
                 creds = json.loads(raw)
                 self.database_url = (
-                    f"postgresql://{creds['username']}:{creds['password']}"
+                    f"postgresql://{quote_plus(creds['username'])}:{quote_plus(creds['password'])}"
                     f"@{creds['host']}:{creds.get('port', 5432)}/{creds['dbname']}"
                 )
 
@@ -74,10 +74,6 @@ class Settings(BaseSettings):
             if not self.database_url:
                 raise ValueError("database_url must be set directly or via db_credentials_secret_arn")
 
-        # SSM-based config (independent of Secrets Manager)
-        if self.schema_config_ssm_param and not self.schema_config_json:
-            self.schema_config_json = _resolve_ssm_parameter(self.schema_config_ssm_param)
-
 
 def _resolve_secret(arn: str) -> str:
     """Fetch a secret value from AWS Secrets Manager."""
@@ -92,32 +88,8 @@ def _resolve_secret(arn: str) -> str:
     return str(resp["SecretString"])
 
 
-def _resolve_ssm_parameter(name: str) -> str:
-    """Fetch a parameter value from AWS SSM Parameter Store."""
-    import boto3
-
-    client = boto3.client("ssm")
-    try:
-        resp = client.get_parameter(Name=name)
-    except Exception:
-        logger.error("Failed to resolve SSM parameter: %s", name)
-        raise
-    return str(resp["Parameter"]["Value"])
-
-
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     settings = Settings()
     settings.resolve_secrets()
     return settings
-
-
-def load_schema_json(settings: Settings) -> dict[str, Any]:
-    """Load schema mapping JSON from settings (inline or file path)."""
-    if settings.schema_config_json:
-        result: dict[str, Any] = json.loads(settings.schema_config_json)
-        return result
-    if settings.schema_config_path:
-        result = json.loads(Path(settings.schema_config_path).read_text())
-        return result
-    raise ValueError("Either schema_config_json or schema_config_path must be set")

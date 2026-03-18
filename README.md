@@ -2,76 +2,7 @@
 
 AI-powered financial query agent. Answers natural language questions about spending, income, and transactions. Deployed as an AWS Lambda invoked by MPI's backend via `boto3 lambda.invoke()`.
 
-Uses a **tools-as-wrappers** architecture: the LLM picks a tool and fills parameters, the service generates and executes parameterized SQL. No raw SQL reaches the LLM. A secondary **visualization agent** generates chart specs from query results when the data is chartable.
-
-```mermaid
-graph LR
-    Q["User Question"] --> QUERY_AGENT
-
-    subgraph QUERY_AGENT["Query Agent (Pydantic AI)"]
-        direction TB
-        subgraph PREDEFINED["Predefined Tools"]
-            direction LR
-            V["query_expenses\nquery_income\nquery_balance_history"]
-            D["search_transactions\nget_recurring_expenses"]
-        end
-    end
-
-    QUERY_AGENT -->|"TextAnswer"| OUT_TEXT["Text Response"]
-    QUERY_AGENT -->|"AnswerWithVisualization"| VIZ_AGENT
-
-    subgraph VIZ_AGENT["Visualization Agent"]
-        direction TB
-        VIZ_IN["Chartable tool results\n(≥ 2 rows)"]
-        VIZ_OUT["pie · bar · line · grouped_bar"]
-    end
-
-    VIZ_AGENT --> OUT_VIZ["Text + Chart Specs"]
-
-    V --> MV[("Materialized Views\n(pre-computed)")]
-    D --> QB["QueryBuilder\n(SchemaMapping → SQL)"]
-    QB --> PG[("PostgreSQL")]
-    MV --> PG
-
-    style QUERY_AGENT fill:#2a2a3c,stroke:#88c,color:#fff
-    style PREDEFINED fill:#2d5a3d,stroke:#4a9,color:#fff
-    style VIZ_AGENT fill:#3a3a5c,stroke:#88c,color:#fff
-```
-
-## Request Lifecycle
-
-```mermaid
-sequenceDiagram
-    participant Client as MPI Frontend
-    participant Backend as MPI Backend
-    participant Lambda as Agent Lambda
-    participant LLM as LLM API
-    participant PG as PostgreSQL
-    participant Dynamo as DynamoDB
-
-    Client->>Backend: "How much did I spend on groceries?"
-    Backend->>Lambda: boto3 lambda.invoke()
-
-    Lambda->>Dynamo: Load conversation history
-    Dynamo-->>Lambda: Encrypted messages (Fernet)
-
-    Lambda->>LLM: System prompt + history + question
-    LLM-->>Lambda: Tool call: query_expenses(...)
-
-    Lambda->>PG: Parameterized SQL ($1, $2, ...)
-    PG-->>Lambda: Query results
-
-    Lambda->>LLM: Tool results
-    LLM-->>Lambda: AnswerWithVisualization
-
-    Note over Lambda: Viz agent runs if chartable data ≥ 2 rows
-    Lambda->>LLM: Viz agent: question + tool results
-    LLM-->>Lambda: ChartSpec[]
-
-    Lambda->>Dynamo: Save updated history (encrypted)
-    Lambda-->>Backend: AgentResponse JSON (answer + charts)
-    Backend-->>Client: Answer + visualizations
-```
+Uses a **text-to-SQL** architecture: the LLM writes SQL against a semantic model; a governance layer validates every query before execution. A secondary visualization agent generates Vega-Lite chart specs when the data is chartable.
 
 ## Architecture
 
@@ -87,262 +18,144 @@ graph TB
 
     subgraph AWS["AWS"]
         subgraph Lambda["Lambda (30s timeout)"]
-            HANDLER[handler.py<br/><i>Entry point</i>]
+            HANDLER[handler.py]
             HANDLER --> AGENT
-            AGENT[Query Agent<br/><i>agent.py</i>]
-            AGENT --> TOOLS
+            AGENT["Query Agent<br/><i>gpt-4.1 · Pydantic AI</i>"]
+            AGENT --> SQL_TOOL
 
-            subgraph TOOLS["Predefined Tools"]
-                T1[query_expenses]
-                T2[query_income]
-                T3[query_balance_history]
-                T4[search_transactions]
-                T5[get_recurring_expenses]
+            subgraph SQL_TOOL["SQL Tool"]
+                T1[execute_sql]
             end
 
-            QB[QueryBuilder<br/><i>SchemaMapping → SQL</i>]
-            T4 --> QB
-            T5 --> QB
+            subgraph GOV["SQL Governance"]
+                R1["SELECT-only"]
+                R2["LIMIT cap (200)"]
+                R3["EXPLAIN pre-flight"]
+                R4["Block CROSS JOIN / set_config"]
+            end
 
-            AGENT -->|AnswerWithVisualization| VIZ
-            VIZ[Visualization Agent<br/><i>visualization.py</i>]
+            SQL_TOOL --> GOV
+
+            AGENT -->|"visualize=true"| VIZ
+            VIZ["Viz Agent<br/><i>gpt-4.1-mini</i>"]
         end
 
-        RDS[(RDS PostgreSQL<br/><i>read-only role</i>)]
-        DDB[(DynamoDB<br/><i>conversation memory</i>)]
+        S3[("S3<br/><i>semantic model YAML</i>")]
+        RDS[("RDS PostgreSQL<br/><i>read-only + RLS</i>")]
+        DDB[("DynamoDB<br/><i>conversation + audit</i>")]
     end
 
-    LLM_API[LLM API<br/><i>OpenAI</i>]
-    LOGFIRE[Logfire<br/><i>PII-scrubbed traces</i>]
+    LOGFIRE["Logfire<br/><i>PII-scrubbed traces</i>"]
 
-    QB -->|parameterized queries| RDS
-    T1 -->|parameterized queries| RDS
-    T2 -->|parameterized queries| RDS
-    T3 -->|parameterized queries| RDS
-    HANDLER <-->|encrypted history| DDB
-    AGENT <-->|inference| LLM_API
+    S3 -.->|cold start| AGENT
+    GOV -->|governed queries| RDS
+    HANDLER <-->|Fernet-encrypted history| DDB
+    AGENT <-->|inference| LLM_API["OpenAI API"]
     VIZ <-->|inference| LLM_API
     HANDLER -.->|traces| LOGFIRE
 
-    style TOOLS fill:#2d5a3d,stroke:#4a9,color:#fff
+    style SQL_TOOL fill:#2d5a3d,stroke:#4a9,color:#fff
+    style GOV fill:#2d5a3d,stroke:#4a9,color:#fff
     style VIZ fill:#3a3a5c,stroke:#88c,color:#fff
     style RDS fill:#1a3a5c,stroke:#4a9,color:#fff
     style DDB fill:#1a3a5c,stroke:#4a9,color:#fff
+    style S3 fill:#1a3a5c,stroke:#4a9,color:#fff
 ```
 
-## Tool Architecture
-
-All query tools are predefined — the LLM picks a tool and fills parameters, the service generates parameterized SQL. No raw SQL from the LLM.
+## Request Lifecycle
 
 ```mermaid
-graph LR
-    Q[User Question] --> AGENT[Pydantic AI Agent]
+sequenceDiagram
+    participant Client as MPI Backend
+    participant Lambda as Agent Lambda
+    participant LLM as OpenAI (gpt-4.1)
+    participant PG as PostgreSQL
+    participant Dynamo as DynamoDB
 
-    AGENT --> PREDEFINED
+    Client->>Lambda: boto3 lambda.invoke()
 
-    subgraph PREDEFINED["Predefined Tools — Safe by Construction"]
-        direction TB
-        V["View-Backed<br/>─────────────<br/>query_expenses<br/>query_income<br/>query_balance_history"]
-        D["Direct Query<br/>─────────────<br/>search_transactions<br/>get_recurring_expenses"]
+    Lambda->>Dynamo: Load conversation history
+    Dynamo-->>Lambda: Encrypted messages (Fernet)
+
+    Lambda->>LLM: System prompt + semantic model + history + question
+    LLM-->>Lambda: Tool call: execute_sql(sql)
+
+    Note over Lambda: SQL Governance validates query
+    Lambda->>PG: Governed SQL (RLS-scoped, LIMIT enforced)
+    PG-->>Lambda: Query results
+
+    Lambda->>LLM: Tool results
+    LLM-->>Lambda: AgentOutput (answer + visualize flag)
+
+    opt visualize=true AND chartable data >= 2 rows
+        Lambda->>LLM: Viz agent (gpt-4.1-mini): question + data
+        LLM-->>Lambda: Vega-Lite chart specs
     end
 
-    V -->|"$1, $2, ..."| DB[(PostgreSQL)]
-    D --> QB[QueryBuilder]
-    QB -->|"$1, $2, ..."| DB
-
-    style PREDEFINED fill:#2d5a3d,stroke:#4a9,color:#fff
+    Lambda->>Dynamo: Save updated history (encrypted)
+    Lambda->>Dynamo: Write audit log (PII-redacted)
+    Lambda-->>Client: AgentResponse (answer + charts)
 ```
 
-## Query Generation Pipeline
+## Semantic Model
 
-View-backed tools (`query_expenses`, `query_income`, `query_balance_history`) query pre-computed materialized views directly. Direct query tools (`search_transactions`, `get_recurring_expenses`) use the `QueryBuilder` to generate SQL from `SchemaMapping`.
+The schema context injected into the system prompt is built from a **semantic model** — a YAML file describing tables, columns, relationships, metrics, filters, and verified queries. Fetched from S3 at cold start and cached for the Lambda instance lifetime. No DB introspection.
 
-```mermaid
-graph LR
-    SM["SchemaMapping<br/>(JSON config)"] --> QB[QueryBuilder]
-    TP["Tool Parameters<br/><i>from LLM</i>"] --> QB
-    UID["user_id<br/><i>injected by service</i>"] --> QB
+The semantic model defines:
+- **Tables & columns** with types, descriptions, synonyms, and enum values
+- **Relationships** (JOIN definitions between tables)
+- **Metrics** (pre-defined aggregations like `SUM(amount) WHERE movement_direction = 'DEBIT'`)
+- **Verified queries** (example question-SQL pairs for few-shot guidance)
+- **Business rules** (custom instructions for edge cases)
 
-    QB --> GQ["GeneratedQuery"]
+For local development, set `SEMANTIC_MODEL_LOCAL_PATH` to use a local YAML file instead of S3.
 
-    subgraph GQ["GeneratedQuery"]
-        SQL["Parameterized SQL<br/><code>SELECT ... WHERE user_id = $1<br/>AND date >= $2 AND date <= $3</code>"]
-        PARAMS["Params: ['user-123', '2026-02-01', '2026-02-28']"]
-    end
+## Security
 
-    GQ -->|connection pool| PG[(PostgreSQL)]
-    PG --> ROWS[Result Rows]
-    ROWS --> LLM[LLM formats answer]
-
-    style SM fill:#3a3a5c,stroke:#88c,color:#fff
-    style GQ fill:#1a3a5c,stroke:#4a9,color:#fff
-```
-
-For multi-source schemas (bank accounts + credit cards), the builder generates `UNION ALL` with independent JOINs per table and re-aggregates across both sources.
-
-## Conversation Memory
-
-```mermaid
-graph TB
-    subgraph Request["Each Request"]
-        LOAD["1. Load history<br/><i>DynamoDB GET</i>"]
-        DECRYPT["2. Decrypt<br/><i>Fernet</i>"]
-        RUN["3. Agent run<br/><i>history + new question</i>"]
-        SUMMARIZE["4. Summarize if long<br/><i>history_processors</i>"]
-        ENCRYPT["5. Encrypt<br/><i>Fernet</i>"]
-        SAVE["6. Save history<br/><i>DynamoDB PUT</i>"]
-
-        LOAD --> DECRYPT --> RUN --> SUMMARIZE --> ENCRYPT --> SAVE
-    end
-
-    subgraph DynamoDB["DynamoDB Table"]
-        direction TB
-        ITEM["<b>Item</b><br/>──────────────────<br/>PK: USER#user-123<br/>SK: SESSION#sess-abc<br/>user_id: user-123<br/>messages_json: <i>(Fernet ciphertext)</i><br/>updated_at: 2026-03-05T..."]
-    end
-
-    LOAD <-.->|"asyncio.to_thread"| DynamoDB
-    SAVE <-.->|"asyncio.to_thread"| DynamoDB
-
-    style DynamoDB fill:#1a3a5c,stroke:#4a9,color:#fff
-    style Request fill:#2a2a3c,stroke:#88c,color:#fff
-```
-
-## Security Model
-
-```mermaid
-graph TB
-    subgraph AUTH["Authentication"]
-        IAM["MPI Backend<br/><i>boto3 invoke + IAM role</i>"]
-    end
-
-    subgraph ISOLATION["User Isolation"]
-        INJ["Service injects user_id<br/><i>from authenticated caller</i>"]
-        STRIP["Strips LLM-generated<br/>user_id conditions"]
-        SCOPE["Every query scoped<br/>WHERE user_id = $1"]
-        INJ --> STRIP --> SCOPE
-    end
-
-    subgraph READONLY["Read-Only Enforcement"]
-        ROLE["DB role: read-only<br/><i>security boundary</i>"]
-        KW["Keyword rejection<br/><i>defense in depth</i>"]
-    end
-
-    subgraph PII["PII Protection"]
-        FERNET["Fernet encryption<br/><i>DynamoDB at rest</i>"]
-        REGEX["Regex scrubbing<br/><i>Logfire traces</i>"]
-    end
-
-    subgraph SQLS["SQL Safety"]
-        PARAM["Parameterized queries<br/><i>$1, $2 — no interpolation</i>"]
-        ALLOW["Table/column allowlist<br/><i>derived from SchemaMapping</i>"]
-        TIMEOUT["30s query timeout"]
-    end
-
-    AUTH --> ISOLATION
-    ISOLATION --> READONLY
-    ISOLATION --> SQLS
-    PII ~~~ SQLS
-
-    style AUTH fill:#5a3d2d,stroke:#a94,color:#fff
-    style ISOLATION fill:#5a3d2d,stroke:#a94,color:#fff
-    style READONLY fill:#5a3d2d,stroke:#a94,color:#fff
-    style PII fill:#3a3a5c,stroke:#88c,color:#fff
-    style SQLS fill:#3a3a5c,stroke:#88c,color:#fff
-```
-
-## Schema Mapping (Client Integration)
-
-The only thing a client provides. A declarative config that maps their DB schema to the agent's tools.
-
-```mermaid
-graph LR
-    subgraph SchemaMapping["SchemaMapping (JSON)"]
-        direction TB
-        TX["transactions<br/>─────────────────<br/>table: account_movements<br/>columns: date, amount, ...<br/>joins: accounts, tags<br/>amount_convention: debit/credit"]
-        CAT["categories<br/>─────────────────<br/>table: tags<br/>columns: id, name<br/>user_scoped: false"]
-        ACCT["accounts<br/>─────────────────<br/>table: accounts<br/>columns: id, name, user_id"]
-        SEC["secondary_transactions<br/><i>(optional)</i><br/>─────────────────<br/>table: credit_card_movements<br/>independent joins + convention"]
-        VIEWS["unified views<br/><i>(optional)</i><br/>─────────────────<br/>unified_expenses<br/>unified_income<br/>unified_balances<br/><i>pre-computed materialized views</i>"]
-    end
-
-    SchemaMapping --> DERIVES
-
-    subgraph DERIVES["Service Derives"]
-        direction TB
-        D1["All predefined tool queries"]
-        D3["User isolation WHERE clauses"]
-        D4["UNION ALL for multi-source"]
-        D5["Schema validation on startup"]
-    end
-
-    style SchemaMapping fill:#3a3a5c,stroke:#88c,color:#fff
-    style DERIVES fill:#2d5a3d,stroke:#4a9,color:#fff
-```
-
-### Schema Config Structure
-
-The schema config is a JSON object provided via `SCHEMA_CONFIG_JSON` (inline), `SCHEMA_CONFIG_PATH` (file), or `SCHEMA_CONFIG_SSM_PARAM` (AWS SSM). In production, MPI's CI/CD manages the SSM parameter.
-
-**Required sections:** `transactions`, `categories`, `accounts`
-
-**Optional sections:** `secondary_transactions` (e.g. credit cards), `unified_expenses`, `unified_income`, `unified_balances`
-
-The unified view mappings are critical — without them, the view-backed tools (`query_expenses`, `query_income`, `query_balance_history`) are **hidden from the LLM** via prepare callbacks. Only `search_transactions` and `get_recurring_expenses` remain available.
-
-Each view mapping requires specific logical keys:
-
-| View | Required keys |
-|------|---------------|
-| `unified_expenses` | `user_id`, `date`, `usd_amount`, `local_amount`, `category`, `merchant` |
-| `unified_income` | `user_id`, `month`, `usd_amount`, `local_amount` |
-| `unified_balances` | `user_id`, `date`, `usd_total`, `local_total` |
-
-Optional key for `unified_balances`: `currency_breakdown` (JSONB per-currency breakdown).
-
-Example view mapping (maps `historical_expenses_mv` materialized view):
-
-```json
-{
-  "unified_expenses": {
-    "table": "historical_expenses_mv",
-    "columns": {
-      "user_id": "user_id",
-      "date": "issued_at",
-      "usd_amount": "usd_amount",
-      "local_amount": "local_amount",
-      "category": "category",
-      "merchant": "description"
-    }
-  }
-}
-```
-
-See `docs/finance-query-agent-spec.md` Section 6 for the full specification, and `localstack/schema-config.json` for a complete working example.
+| Layer | Mechanism |
+|-------|-----------|
+| **User isolation** | PostgreSQL RLS via `app.user_id` session variable, set by the service (never by the LLM) |
+| **Read-only** | DB role with SELECT-only grants + `conn.transaction(readonly=True)` |
+| **SQL governance** | SELECT-only enforcement, LIMIT cap (200), CROSS JOIN / `set_config()` blocking |
+| **Pre-flight** | `EXPLAIN` validates SQL against live schema without reading data |
+| **PII at rest** | Fernet encryption for DynamoDB conversation history |
+| **PII in traces** | Regex scrubbing in Logfire spans and audit logs |
+| **Prompt hardening** | System prompt rejects override attempts, refuses non-financial questions |
 
 ## Invocation
 
-POST request with JSON body:
-
 ```json
 {
-  "user_id": "user-123",
+  "user_id": 1,
   "session_id": "sess-abc",
   "question": "How much did I spend on groceries last month?"
 }
 ```
+
+`user_id` must be a positive integer (int or numeric string). `session_id` is a free-form string for conversation continuity.
 
 Response:
 
 ```json
 {
   "answer": "You spent $235.50 on groceries last month across 3 transactions.",
-  "tool_calls": [...],
+  "tool_calls": [
+    {
+      "tool_name": "execute_sql",
+      "parameters": { "sql": "..." },
+      "execution_time_ms": 42,
+      "row_count": 3
+    }
+  ],
   "visualizations": [
     {
-      "chart_type": "pie",
-      "title": "Spending by Category (USD)",
-      "currency": "USD",
-      "slices": [{"label": "Groceries", "value": 235.50, "percentage": 42.1}, ...]
+      "spec": {
+        "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+        "mark": "arc",
+        "title": "Grocery Spending",
+        "data": { "values": ["..."] },
+        "encoding": { "...": "..." }
+      }
     }
   ],
   "unresolved": false,
@@ -351,36 +164,32 @@ Response:
 }
 ```
 
-`visualizations` is `null` when the query agent returns `TextAnswer` or the data isn't chartable. Chart types: `pie`, `bar`, `line`, `grouped_bar`.
+`visualizations` is `null` when `visualize=false` or the data isn't chartable (< 2 rows). Chart types: `bar`, `line`, `pie`, `area`, `scatter`, `heatmap`, `stacked_bar`, `grouped_bar`.
 
 ## Project Structure
 
 ```
 src/finance_query_agent/
 ├── handler.py              Lambda entry point
-├── agent.py                Query agent + system prompt
-├── visualization.py        Visualization agent (chart spec generation)
-├── config.py               Settings from env vars
-├── query_builder.py        SchemaMapping → parameterized SQL
-├── connection.py           asyncpg single connection (Lambda-aware)
-├── memory.py               DynamoDB conversation history
+├── agent.py                Query agent (gpt-4.1) + system prompt
+├── visualization.py        Visualization agent (gpt-4.1-mini, Vega-Lite)
+├── vega_builder.py         ChartIntent → Vega-Lite v5 spec
+├── config.py               Settings from env vars (pydantic-settings)
+├── schema_builder.py       Semantic model (S3 YAML → system prompt context)
+├── sql_governance.py       SQL validation (SELECT-only, LIMIT, EXPLAIN)
+├── connection.py           asyncpg pool, warm-cached across invocations
+├── memory.py               DynamoDB conversation history (Fernet-encrypted)
+├── audit.py                DynamoDB audit trail (PII-redacted, 90-day TTL)
+├── history.py              Conversation summarization (gpt-4.1-mini)
 ├── encryption.py           Fernet field encryption
 ├── redaction.py            Regex PII scrubbing
-├── history.py              Conversation summarization
-├── observability.py        Logfire + scrubbing callback
+├── observability.py        Logfire initialization + scrubbing callback
 ├── exceptions.py           Exception hierarchy
 ├── tools/
-│   ├── unified.py          query_expenses, query_income, query_balance_history (view-backed)
-│   ├── transactions.py     search_transactions
-│   └── recurring.py        get_recurring_expenses
-├── validation/
-│   └── schema_validator.py Validates mapping against live DB
+│   └── sql.py              execute_sql tool + asyncpg type normalization
 └── schemas/
-    ├── mapping.py          SchemaMapping, TableMapping, ViewMapping, JoinDef, ColumnRef
-    ├── charts.py           Chart specs (pie, bar, line, grouped_bar)
-    ├── unified_results.py  ExpenseGroup, IncomeMonth, BalanceSnapshot
-    ├── tool_results.py     Transaction, TransactionSearchResult, RecurringExpense
-    └── responses.py        AgentResponse, AgentOutput, ChartSpec
+    ├── charts.py           ChartIntent + VegaLiteChart models
+    └── responses.py        AgentOutput, AgentResponse, ToolCallRecord, TokenUsage
 ```
 
 ## Development

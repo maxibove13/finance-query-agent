@@ -14,14 +14,6 @@ variable "secondary_model" {
   default = "openai:gpt-4.1-mini"
 }
 
-# Schema
-variable "schema_config_json" {
-  type        = string
-  sensitive   = true
-  description = "SchemaMapping JSON — seeds SSM parameter on first apply, ignored after"
-  default     = "{}"
-}
-
 # Lambda
 variable "memory_size" {
   type    = number
@@ -46,4 +38,15 @@ variable "allowed_origins" {
 variable "authorized_caller_arns" {
   type    = list(string)
   default = []
+}
+
+# Semantic model
+variable "semantic_model_s3_bucket" {
+  type        = string
+  description = "S3 bucket containing the semantic model YAML"
+}
+
+variable "semantic_model_s3_key" {
+  type    = string
+  default = "semantic-model.yaml"
 }

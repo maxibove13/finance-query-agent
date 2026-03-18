@@ -51,6 +51,15 @@ resource "aws_iam_role_policy" "lambda_app" {
       {
         Effect = "Allow"
         Action = [
+          "dynamodb:PutItem",
+        ]
+        Resource = [
+          aws_dynamodb_table.audit.arn,
+        ]
+      },
+      {
+        Effect = "Allow"
+        Action = [
           "secretsmanager:GetSecretValue",
         ]
         Resource = [
@@ -63,10 +72,10 @@ resource "aws_iam_role_policy" "lambda_app" {
       {
         Effect = "Allow"
         Action = [
-          "ssm:GetParameter",
+          "s3:GetObject",
         ]
         Resource = [
-          aws_ssm_parameter.schema_config.arn,
+          "arn:aws:s3:::${var.semantic_model_s3_bucket}/${var.semantic_model_s3_key}",
         ]
       },
     ]
@@ -90,17 +99,6 @@ resource "aws_secretsmanager_secret" "logfire_token" {
   name = "${var.project_name}/logfire-token"
 }
 
-# Schema config — seeded by Terraform, updated by client (MPI) CI/CD
-resource "aws_ssm_parameter" "schema_config" {
-  name  = "/${var.project_name}/schema-config"
-  type  = "String"
-  value = var.schema_config_json
-
-  lifecycle {
-    ignore_changes = [value]
-  }
-}
-
 # Lambda Function
 resource "aws_lambda_function" "agent" {
   function_name = var.project_name
@@ -114,9 +112,11 @@ resource "aws_lambda_function" "agent" {
     variables = {
       DYNAMODB_TABLE            = aws_dynamodb_table.conversations.name
       DYNAMODB_REGION           = data.aws_region.current.name
+      AUDIT_TABLE               = aws_dynamodb_table.audit.name
       PRIMARY_MODEL             = var.primary_model
       SECONDARY_MODEL           = var.secondary_model
-      SCHEMA_CONFIG_SSM_PARAM   = aws_ssm_parameter.schema_config.name
+      SEMANTIC_MODEL_S3_BUCKET  = var.semantic_model_s3_bucket
+      SEMANTIC_MODEL_S3_KEY     = var.semantic_model_s3_key
       DB_CREDENTIALS_SECRET_ARN = aws_secretsmanager_secret.db_credentials.arn
       ENCRYPTION_KEY_SECRET_ARN = aws_secretsmanager_secret.encryption_key.arn
       LLM_API_KEY_SECRET_ARN    = aws_secretsmanager_secret.llm_api_key.arn

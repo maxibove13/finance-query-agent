@@ -7,6 +7,7 @@ from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
     ModelResponse,
+    TextPart,
     ToolCallPart,
     ToolReturnPart,
 )
@@ -15,6 +16,7 @@ from finance_query_agent.config import get_settings
 
 KEEP_RECENT = 6
 SUMMARIZE_THRESHOLD = 20
+SUMMARY_MARKER = "[PRIOR CONTEXT SUMMARIZED]"
 
 _SUMMARIZER_INSTRUCTIONS = (
     "Summarize this financial assistant conversation concisely. "
@@ -42,6 +44,13 @@ def _is_tool_message(msg: ModelMessage) -> bool:
     return False
 
 
+def _is_summary_message(msg: ModelMessage) -> bool:
+    """True if msg is a synthetic summary produced by a prior summarize_history call."""
+    return isinstance(msg, ModelResponse) and any(
+        isinstance(p, TextPart) and p.content.startswith(SUMMARY_MARKER) for p in msg.parts
+    )
+
+
 async def summarize_history(messages: list[ModelMessage]) -> list[ModelMessage]:
     """Compress old messages via LLM summarization. Keeps recent messages verbatim."""
     if len(messages) <= SUMMARIZE_THRESHOLD:
@@ -57,9 +66,18 @@ async def summarize_history(messages: list[ModelMessage]) -> list[ModelMessage]:
     if not to_summarize:
         return messages  # can't safely split
 
+    # Strip a prior synthetic summary from the front to avoid summarizing a summary.
+    # A fresh summary of the real messages that followed is more accurate.
+    if _is_summary_message(to_summarize[0]):
+        to_summarize = to_summarize[1:]
+
+    if not to_summarize:
+        return messages  # only a prior summary remained; nothing new to compress
+
     summarizer = _get_summarizer()
     result = await summarizer.run(
         "Summarize the conversation above.",
         message_history=to_summarize,
     )
-    return result.new_messages() + to_keep
+    summary = ModelResponse(parts=[TextPart(content=f"{SUMMARY_MARKER}\n{result.output}")])
+    return [summary] + to_keep

@@ -10,9 +10,9 @@ import pytest
 from pydantic_ai.exceptions import UsageLimitExceeded
 
 import finance_query_agent.handler as handler_module
+from finance_query_agent.exceptions import ConversationConflictError
 from finance_query_agent.handler import _process_request, handler
 from finance_query_agent.schemas.responses import AnswerWithVisualization, TextAnswer
-from finance_query_agent.validation.schema_validator import ColumnTypeInfo
 
 _PATCH_TARGET = "finance_query_agent.handler._process_request"
 
@@ -38,19 +38,6 @@ class TestHandler:
 
         assert "user_id" in result["error"]
 
-    def test_returns_error_on_schema_mismatch(self) -> None:
-        from finance_query_agent.exceptions import SchemaValidationError
-
-        with patch(
-            _PATCH_TARGET,
-            new_callable=AsyncMock,
-            side_effect=SchemaValidationError("column 'foo' does not exist on table 'bar'"),
-        ):
-            result = handler(_EVENT, None)
-
-        assert result["error"] == "schema_mismatch"
-        assert "foo" in result["message"]
-
     def test_returns_error_on_unexpected_error(self) -> None:
         with patch(_PATCH_TARGET, new_callable=AsyncMock, side_effect=RuntimeError("boom")):
             result = handler(_EVENT, None)
@@ -67,7 +54,7 @@ def _build_mocks() -> dict:
     """Build mock objects for all _process_request external dependencies."""
     conn = AsyncMock()
     memory = AsyncMock()
-    memory.load_history.return_value = []
+    memory.load_history.return_value = ([], 0)
 
     usage = MagicMock(input_tokens=100, output_tokens=50)
     result = MagicMock()
@@ -91,19 +78,15 @@ def _build_mocks() -> dict:
     settings.secondary_model = "test:viz"
     settings.max_question_length = 2000
     settings.max_session_id_length = 128
+    settings.aws_lambda_function_name = None
+    settings.audit_table = None
 
     targets = {
         "finance_query_agent.observability.initialize": MagicMock(),
         "finance_query_agent.config.get_settings": MagicMock(return_value=settings),
-        "finance_query_agent.config.load_schema_json": MagicMock(return_value={}),
-        "finance_query_agent.schemas.mapping.SchemaMapping": MagicMock(),
         "finance_query_agent.connection.Connection": MagicMock(return_value=conn),
         "finance_query_agent.encryption.FieldEncryptor": MagicMock(),
         "finance_query_agent.memory.ConversationMemory": MagicMock(return_value=memory),
-        "finance_query_agent.query_builder.QueryBuilder": MagicMock(),
-        "finance_query_agent.validation.schema_validator.validate_schema": AsyncMock(
-            return_value=ColumnTypeInfo(user_id_type="int4", direction_is_enum=True)
-        ),
         "finance_query_agent.agent.get_agent": MagicMock(return_value=agent),
     }
 
@@ -266,7 +249,6 @@ class TestProcessRequest:
     @pytest.mark.asyncio()
     async def test_text_answer_skips_visualization(self, mocks: dict) -> None:
         """TextAnswer output should never trigger the viz pipeline."""
-        # result.output is already TextAnswer from _build_mocks
         with ExitStack() as stack:
             _apply(stack, mocks["targets"])
             viz_mock = stack.enter_context(
@@ -283,25 +265,25 @@ class TestProcessRequest:
         result_mock = mocks["agent"].run.return_value
         result_mock.output = AnswerWithVisualization(answer="Here's your breakdown")
 
-        # Make agent.run populate tool_results on deps
         original_return = result_mock
 
         async def _run_with_results(*args, **kwargs):
             deps = kwargs["deps"]
-            deps.tool_results = [("query_expenses", ["a", "b"])]
+            deps.tool_results = [("execute_sql", ["a", "b"])]
             return original_return
 
         mocks["agent"].run = AsyncMock(side_effect=_run_with_results)
 
-        from finance_query_agent.schemas.charts import PieChartSpec
+        from finance_query_agent.schemas.charts import VegaLiteChart
 
-        chart = PieChartSpec(
-            title="Test",
-            currency="USD",
-            slices=[
-                {"label": "A", "value": 60.0, "percentage": 60.0},
-                {"label": "B", "value": 40.0, "percentage": 40.0},
-            ],
+        chart = VegaLiteChart(
+            spec={
+                "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+                "title": "Test",
+                "mark": "bar",
+                "data": {"values": [{"x": "A", "y": 60}, {"x": "B", "y": 40}]},
+                "encoding": {"x": {"field": "x"}, "y": {"field": "y"}},
+            }
         )
 
         with ExitStack() as stack:
@@ -321,8 +303,62 @@ class TestProcessRequest:
         assert len(resp.visualizations) == 1
 
     @pytest.mark.asyncio()
+    async def test_audit_called_on_usage_limit_exceeded(self, mocks: dict) -> None:
+        mocks["settings"].audit_table = "test-audit"
+        mocks["agent"].run = AsyncMock(side_effect=UsageLimitExceeded("request_limit of 7 exceeded"))
+        audit_mock = AsyncMock()
+
+        with ExitStack() as stack:
+            _apply(stack, mocks["targets"])
+            stack.enter_context(patch("finance_query_agent.audit.SqlAudit", return_value=audit_mock))
+            resp = await _process_request(_BODY)
+
+        assert resp.unresolved is True
+        audit_mock.write_invocation.assert_awaited_once()
+        call_kwargs = audit_mock.write_invocation.call_args.kwargs
+        assert call_kwargs["unresolved"] is True
+        assert call_kwargs["token_usage"].input_tokens == 0
+
+    @pytest.mark.asyncio()
+    async def test_audit_write_called_when_enabled(self, mocks: dict) -> None:
+        mocks["settings"].audit_table = "test-audit"
+        audit_mock = AsyncMock()
+
+        with ExitStack() as stack:
+            _apply(stack, mocks["targets"])
+            stack.enter_context(patch("finance_query_agent.audit.SqlAudit", return_value=audit_mock))
+            await _process_request(_BODY)
+
+        audit_mock.write_invocation.assert_awaited_once()
+
+    @pytest.mark.asyncio()
+    async def test_audit_not_called_when_disabled(self, mocks: dict) -> None:
+        mocks["settings"].audit_table = None
+        audit_mock = AsyncMock()
+
+        with ExitStack() as stack:
+            _apply(stack, mocks["targets"])
+            audit_cls = stack.enter_context(patch("finance_query_agent.audit.SqlAudit", return_value=audit_mock))
+            await _process_request(_BODY)
+
+        audit_cls.assert_not_called()
+
+    @pytest.mark.asyncio()
+    async def test_audit_failure_does_not_fail_request(self, mocks: dict) -> None:
+        mocks["settings"].audit_table = "test-audit"
+        audit_mock = AsyncMock()
+        audit_mock.write_invocation.side_effect = Exception("DynamoDB unreachable")
+
+        with ExitStack() as stack:
+            _apply(stack, mocks["targets"])
+            stack.enter_context(patch("finance_query_agent.audit.SqlAudit", return_value=audit_mock))
+            resp = await _process_request(_BODY)
+
+        assert resp.answer == "The answer is 42"
+
+    @pytest.mark.asyncio()
     async def test_answer_with_viz_skips_when_guardrails_fail(self, mocks: dict) -> None:
-        """AnswerWithVisualization but non-chartable data should not trigger viz."""
+        """AnswerWithVisualization but only 1 row (not enough to chart) should not trigger viz."""
         result_mock = mocks["agent"].run.return_value
         result_mock.output = AnswerWithVisualization(answer="No chart for you")
 
@@ -330,7 +366,7 @@ class TestProcessRequest:
 
         async def _run_with_results(*args, **kwargs):
             deps = kwargs["deps"]
-            deps.tool_results = [("search_transactions", ["a", "b"])]
+            deps.tool_results = [("execute_sql", [{"only": "one row"}])]  # 1 row → should_visualize=False
             return original_return
 
         mocks["agent"].run = AsyncMock(side_effect=_run_with_results)
@@ -351,7 +387,7 @@ class TestProcessRequest:
 
 
 class TestInputValidation:
-    """Tests for input validation added in _process_request."""
+    """Tests for input validation in _process_request."""
 
     @pytest.fixture(autouse=True)
     def _reset_init(self):
@@ -434,3 +470,33 @@ class TestInputValidation:
             _apply(stack, mocks["targets"])
             resp = await _process_request({"user_id": 1, "session_id": "s1", "question": "  test?  "})
         assert resp.original_question == "test?"
+
+    @pytest.mark.asyncio()
+    async def test_strips_whitespace_from_session_id(self, mocks: dict) -> None:
+        with ExitStack() as stack:
+            _apply(stack, mocks["targets"])
+            await _process_request({"user_id": 1, "session_id": "  s1  ", "question": "test?"})
+
+        args = mocks["memory"].save_history.call_args[0]
+        assert args[1] == "s1"
+
+
+class TestConversationConflict:
+    @pytest.fixture(autouse=True)
+    def _reset_init(self):
+        handler_module._initialized = False
+        yield
+        handler_module._initialized = False
+
+    @pytest.fixture()
+    def mocks(self):
+        return _build_mocks()
+
+    @pytest.mark.asyncio()
+    async def test_conflict_on_save_propagates(self, mocks: dict) -> None:
+        mocks["memory"].save_history.side_effect = ConversationConflictError("concurrent write")
+
+        with ExitStack() as stack:
+            _apply(stack, mocks["targets"])
+            with pytest.raises(ConversationConflictError):
+                await _process_request(_BODY)

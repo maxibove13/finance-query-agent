@@ -18,6 +18,8 @@ dependencies = [
     "cryptography>=43.0",
     "tenacity>=9.0",
     "logfire>=3.0",
+    "sqlglot>=25.0",
+    "pyyaml>=6.0",
 ]
 
 [tool.uv]
@@ -31,6 +33,7 @@ dev-dependencies = [
     "diff-cover>=9.0",
     "testcontainers[postgres]>=4.0",
     "moto[dynamodb]>=5.0",
+    "types-pyyaml>=6.0.12.20250915",
 ]
 
 [tool.hatch.build.targets.wheel]

@@ -5,10 +5,6 @@ class FinanceQueryError(Exception):
     """Base exception for all finance query agent errors."""
 
 
-class SchemaValidationError(FinanceQueryError):
-    """Schema mapping does not match the live database."""
-
-
 class DatabaseConnectionError(FinanceQueryError):
     """Database connection error (creation, health, closure)."""
 
@@ -19,3 +15,7 @@ class QueryTimeoutError(FinanceQueryError):
 
 class LLMError(FinanceQueryError):
     """LLM API call failed (rate limit, auth, network, unexpected response)."""
+
+
+class ConversationConflictError(FinanceQueryError):
+    """Concurrent write detected: conversation was modified between load and save."""

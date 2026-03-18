@@ -14,6 +14,6 @@ output "ecr_repository_url" {
   value = data.aws_ecr_repository.agent.repository_url
 }
 
-output "schema_config_ssm_parameter_name" {
-  value = aws_ssm_parameter.schema_config.name
+output "audit_table_name" {
+  value = aws_dynamodb_table.audit.name
 }
