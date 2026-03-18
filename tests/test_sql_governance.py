@@ -183,6 +183,27 @@ class TestValidateAllowedTables:
                 frozenset({"accounts"}),
             )
 
+    def test_allowed_tables_accepts_exchange_rate_join(self) -> None:
+        allowed = frozenset(
+            {
+                "account_movements",
+                "accounts",
+                "historical_exchange_rates",
+                "latest_exchange_rates_mv",
+            }
+        )
+        validate_allowed_tables(
+            "SELECT am.amount / COALESCE(her.rate, ler.rate) AS usd_amount "
+            "FROM account_movements am "
+            "JOIN accounts a ON am.account_id = a.id "
+            "LEFT JOIN historical_exchange_rates her "
+            "ON her.rated_on = am.issued_at::date AND her.source_currency = 'USD' AND her.target_currency = a.currency "
+            "LEFT JOIN latest_exchange_rates_mv ler "
+            "ON ler.target_currency = a.currency "
+            "LIMIT 100",
+            allowed,
+        )
+
 
 class TestCapLimit:
     def test_adds_limit_when_missing(self) -> None:

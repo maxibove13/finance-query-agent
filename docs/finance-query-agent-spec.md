@@ -200,7 +200,7 @@ Supported chart types: `bar`, `line`, `pie`, `area`, `scatter`, `heatmap`, `stac
 
 ## 10. Multi-Currency Behavior
 
-Financial data often spans multiple currencies. The LLM is aware of this via the schema documentation and is instructed to present multi-currency results clearly (e.g., "You spent $1,200 USD and $45,000 UYU on groceries last month"). The `execute_sql` tool returns raw per-transaction currency values; the LLM formats and groups them in the answer.
+Financial data often spans multiple currencies. The semantic model includes two exchange rate tables (`historical_exchange_rates` and `latest_exchange_rates_mv`) that enable SQL-level currency conversion. Rates are stored as USD → target (e.g., 1 USD = 43.5 UYU). To convert a non-USD amount to USD, the LLM divides by the rate; to convert USD to another currency, it multiplies. The `latest_exchange_rates_mv` view serves as a fallback when no historical rate exists for the exact transaction date. The `execute_sql` tool returns raw per-transaction currency values; the LLM formats and groups them in the answer.
 
 ## 11. Conversation Memory & History Summarization
 
@@ -310,4 +310,4 @@ User scoping is enforced by PostgreSQL Row Level Security. Before executing a qu
 
 ## 17. Open Questions
 
-1. **Currency handling:** The service returns per-currency results from raw queries. Should the LLM present all currencies, or should the system prompt instruct it to highlight the "primary" currency? If so, how is primary currency determined?
+1. ~~**Currency handling:**~~ Resolved. The semantic model now includes `historical_exchange_rates` and `latest_exchange_rates_mv` tables with custom instructions for SQL-level currency conversion. The LLM can convert between currencies at query time using JOIN-based rate lookups.

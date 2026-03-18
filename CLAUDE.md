@@ -75,7 +75,7 @@ Browser -> MPI API Gateway -> MPI Lambda -> boto3 invoke -> Agent Lambda
 - **Text-to-SQL:** Single `execute_sql` tool. The LLM writes SQL against a schema injected into the system prompt; a governance layer validates every query before execution.
 - **Schema from S3:** Semantic model (YAML) fetched from S3 at cold start by `schema_builder.py`. No DB introspection — the YAML is the sole source of truth.
 - **Two models:** `primary_model` (gpt-4.1) for the query agent, `secondary_model` (gpt-4.1-mini) for visualization and history summarization.
-- **Multi-currency:** The `execute_sql` tool returns raw per-transaction currency values; the LLM formats and groups them in the answer.
+- **Multi-currency:** The semantic model includes `historical_exchange_rates` and `latest_exchange_rates_mv` for SQL-level currency conversion (USD ↔ UYU/ARS/BRL/EUR). The `execute_sql` tool returns raw per-transaction currency values; the LLM formats and groups them in the answer.
 - **User isolation:** Every query scoped to `user_id` via PostgreSQL RLS. Injected by the service, never by the LLM.
 - **Read-only:** No write operations. Enforced at DB role level (security boundary).
 - **PII protection:** Two layers — Fernet encryption at rest (DynamoDB), regex scrubbing in audit logs and traces (Logfire). No NER models.
