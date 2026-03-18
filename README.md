@@ -79,10 +79,10 @@ sequenceDiagram
     PG-->>Lambda: Query results
 
     Lambda->>LLM: Tool results
-    LLM-->>Lambda: AgentOutput with answer + viz flag
+    LLM-->>Lambda: AgentOutput with answer + viz_data
 
-    opt visualize=true AND chartable data
-        Lambda->>LLM: Viz agent gpt-4.1-mini with question + data
+    opt viz_data present AND time budget remaining
+        Lambda->>LLM: Viz agent gpt-4.1-mini with question + viz_data
         LLM-->>Lambda: Vega-Lite chart specs
     end
 
@@ -93,14 +93,14 @@ sequenceDiagram
 
 ## Semantic Model
 
-The schema context injected into the system prompt is built from a **semantic model** — a YAML file describing tables, columns, relationships, metrics, filters, and verified queries. Fetched from S3 at cold start and cached for the Lambda instance lifetime. No DB introspection.
+The schema context injected into the system prompt is built from a **semantic model** — a YAML file describing tables, columns, relationships, metrics, and verified queries. Fetched from S3 at cold start and cached for the Lambda instance lifetime. No DB introspection.
 
 The semantic model defines:
 - **Tables & columns** with types, descriptions, synonyms, and enum values
 - **Relationships** (JOIN definitions between tables)
 - **Metrics** (pre-defined aggregations like `SUM(amount) WHERE movement_direction = 'DEBIT'`)
 - **Verified queries** (example question-SQL pairs for few-shot guidance)
-- **Business rules** (custom instructions for edge cases)
+- **Business rules** (custom instructions for currency conversion, tag mapping, etc.)
 
 For local development, set `SEMANTIC_MODEL_LOCAL_PATH` to use a local YAML file instead of S3.
 
