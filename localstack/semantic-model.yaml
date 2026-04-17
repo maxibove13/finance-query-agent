@@ -205,19 +205,20 @@ relationships:
         right_column: id
 
 custom_instructions: |
-  - movement_direction = 'DEBIT' means expense/outflow; 'CREDIT' means income/inflow.
-  - Tag names are in Spanish (e.g. Supermercado, Transporte, Restaurantes, Salud, Suscripciones). When the user asks about a category in English, map it to the corresponding Spanish tag name.
+  SQL STYLE:
+  - Use table aliases (e.g., am, t, a) in all queries.
+  - Use CTEs (WITH) for multi-step logic. Never use DISTINCT ON — use ROW_NUMBER() OVER (PARTITION BY ... ORDER BY ...) in a CTE, then filter WHERE rn = 1.
+  - Use ILIKE '%term%' for case-insensitive text search on description or tag name.
+  - Use DATE_TRUNC, EXTRACT, and interval arithmetic for date grouping and filtering.
+  - Resolve relative dates: "last month" = DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month') to DATE_TRUNC('month', CURRENT_DATE).
+
+  DATA RULES:
+  - movement_direction = 'DEBIT' is expense/outflow; 'CREDIT' is income/inflow. amount is always positive.
+  - Tag names are in Spanish (e.g., Supermercado, Transporte, Restaurantes). Map English category names to Spanish.
   - To query all transactions across bank + credit card, UNION ALL account_movements and credit_card_movements.
-  - Always join to tags to get human-readable category names.
-  - Join account_movements to accounts for currency and account alias.
-  - Use DATE_TRUNC and EXTRACT for date grouping. Use interval arithmetic for relative dates.
-  - amount is always positive; use movement_direction to distinguish expenses from income.
-  - CURRENCY CONVERSION: historical_exchange_rates stores rates as "1 USD = <rate> <target>".
-    To convert a non-USD amount to USD: amount / rate.
-    To convert USD to another currency: amount * rate.
-    JOIN on rated_on = issued_at::date AND target_currency = <the non-USD currency>.
-    If no exact date match exists, use latest_exchange_rates_mv as fallback via COALESCE.
-  - Do NOT invent table names for exchange rates or currencies. The ONLY tables with rate data are historical_exchange_rates and latest_exchange_rates_mv.
+  - Join account_movements to accounts for currency and account alias. Join either movements table to tags for category name.
+  - CURRENCY CONVERSION: historical_exchange_rates stores "1 USD = <rate> <target>". Non-USD to USD: amount / rate. USD to other: amount * rate. JOIN on rated_on = issued_at::date AND target_currency = <non-USD currency>. Fallback: COALESCE with latest_exchange_rates_mv.
+  - The ONLY exchange rate tables are historical_exchange_rates and latest_exchange_rates_mv.
 
 verified_queries:
   - question: How much did I spend last month?
@@ -259,3 +260,36 @@ verified_queries:
         AND a.currency = 'UYU'
         AND am.issued_at >= DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month')
         AND am.issued_at < DATE_TRUNC('month', CURRENT_DATE)
+  - question: What was my largest single expense this month?
+    sql: |
+      SELECT am.description, am.amount, am.issued_at
+      FROM account_movements am
+      WHERE am.movement_direction = 'DEBIT'
+        AND am.issued_at >= DATE_TRUNC('month', CURRENT_DATE)
+      ORDER BY am.amount DESC
+      LIMIT 1
+  - question: What is the most recent transaction per category?
+    sql: |
+      WITH ranked AS (
+        SELECT am.description, am.amount, am.issued_at, t.name AS category,
+               ROW_NUMBER() OVER (PARTITION BY t.name ORDER BY am.issued_at DESC) AS rn
+        FROM account_movements am
+        LEFT JOIN tags t ON am.category_id = t.id
+        WHERE am.issued_at >= CURRENT_DATE - INTERVAL '3 months'
+      )
+      SELECT category, description, amount, issued_at
+      FROM ranked
+      WHERE rn = 1
+      ORDER BY category
+  - question: Compare my spending this month vs last month by category
+    sql: |
+      SELECT t.name AS category,
+             SUM(CASE WHEN am.issued_at >= DATE_TRUNC('month', CURRENT_DATE) THEN am.amount ELSE 0 END) AS this_month,
+             SUM(CASE WHEN am.issued_at >= DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month')
+                       AND am.issued_at < DATE_TRUNC('month', CURRENT_DATE) THEN am.amount ELSE 0 END) AS last_month
+      FROM account_movements am
+      LEFT JOIN tags t ON am.category_id = t.id
+      WHERE am.movement_direction = 'DEBIT'
+        AND am.issued_at >= DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month')
+      GROUP BY t.name
+      ORDER BY this_month DESC

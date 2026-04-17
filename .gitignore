@@ -38,7 +38,6 @@ Thumbs.db
 # Environment
 .env
 .env.local
-.env.localstack
 
 # LocalStack
 localstack/volume/

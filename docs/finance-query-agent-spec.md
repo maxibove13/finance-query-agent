@@ -35,7 +35,8 @@ Users of financial applications need to ask natural language questions about the
 ```
 MPI Lambda ──> boto3 invoke ──> Agent Lambda
                                  ├── Pydantic AI Agent
-                                 │   └── execute_sql  (single SQL tool)
+                                 │   ├── execute_sql  (SQL tool)
+                                 │   └── render_*     (6 render tools → generative UI)
                                  ├── SQL Governance (validate_select_only)
                                  ├── schema_builder.py (S3 semantic model YAML)
                                  ├── asyncpg pool → RDS (read-only)
@@ -106,7 +107,7 @@ Configuration is via environment variables (set by Terraform):
 | Variable | Description |
 |----------|-------------|
 | `PRIMARY_MODEL` | Pydantic AI model string for query agent (default: `openai:gpt-4.1`) |
-| `SECONDARY_MODEL` | Model for visualization agent + history summarization (default: `openai:gpt-4.1-mini`) |
+| `SECONDARY_MODEL` | Model for history summarization (default: `openai:gpt-4.1-mini`) |
 | `DYNAMODB_TABLE` | DynamoDB table for conversation memory |
 | `AUDIT_TABLE` | DynamoDB table for SQL audit trail (optional; `None` = audit disabled) |
 | `SEMANTIC_MODEL_S3_BUCKET` | S3 bucket containing the semantic model YAML |
@@ -164,7 +165,7 @@ The default system prompt MUST:
 class AgentResponse(BaseModel):
     answer: str                                        # Natural language answer
     tool_calls: list[ToolCallRecord]                   # Which tools were used, with params
-    visualizations: list[VegaLiteChart] | None = None  # Vega-Lite v5 chart specs (null if text-only)
+    render_calls: list[RenderCall]                     # UI components to render (empty if text-only)
     unresolved: bool                                   # True if the agent couldn't answer
     original_question: str
     token_usage: TokenUsage                            # LLM token consumption
@@ -179,24 +180,35 @@ class TokenUsage(BaseModel):
     input_tokens: int
     output_tokens: int
 
-class VegaLiteChart(BaseModel):
-    spec: dict[str, Any]  # Full Vega-Lite v5 JSON spec
+class RenderCall(BaseModel):
+    component: str        # Component identifier (e.g., "donut_chart", "metric_card")
+    data: dict[str, Any]  # Structured data for the frontend component
 ```
 
 The consuming application decides how to present this to the user (chat UI, API response, etc.).
 
-### 9.1 Agent Output Types
+### 9.1 Agent Output & Render Tools
 
-The query agent returns a **union** result type that determines whether visualization runs:
+The query agent returns a single **structured output** model:
 
 ```python
-AgentOutput = TextAnswer | AnswerWithVisualization
+class AgentOutput(BaseModel):
+    answer: str
 ```
 
-- **`TextAnswer`** — text-only response, no visualization agent runs.
-- **`AnswerWithVisualization`** — triggers the visualization agent if the tool results contain ≥ 2 data rows. The visualization agent (running on `secondary_model`) produces `ChartIntent` objects which are converted to full Vega-Lite v5 specs by `vega_builder.py`.
+- **`answer`** — the natural-language response to the user's question.
 
-Supported chart types: `bar`, `line`, `pie`, `area`, `scatter`, `heatmap`, `stacked_bar`, `grouped_bar`.
+When the data is chartable, the primary agent calls **render tools** directly (no secondary LLM call). Each render tool returns a `RenderCall` with a React component name and its props. The handler collects all render tool calls and includes them in `AgentResponse.render_calls`.
+
+Available render tools (defined in `tools/render.py`):
+- `render_donut_chart` — proportional breakdowns (e.g., spending by category)
+- `render_bubble_chart` — comparative magnitude visualization
+- `render_cash_flow` — income vs expenses summary for a period
+- `render_cash_flow_historical` — income vs expenses over time (monthly/weekly)
+- `render_category_breakdown` — detailed category-level breakdown with amounts
+- `render_metric_card` — single KPI display (total spent, average, etc.)
+
+The frontend matches the `component` field in each `RenderCall` to a React component (Recharts-based).
 
 ## 10. Multi-Currency Behavior
 
@@ -237,8 +249,6 @@ finance-query-agent/
 │       ├── __init__.py               <- Package exports
 │       ├── handler.py                <- Lambda entry point
 │       ├── agent.py                  <- Query agent definition + system prompt
-│       ├── visualization.py          <- Visualization agent (Vega-Lite chart generation)
-│       ├── vega_builder.py           <- ChartIntent → full Vega-Lite v5 spec
 │       ├── config.py                 <- Settings from env vars + Secrets Manager
 │       ├── sql_governance.py         <- validate_select_only + cap_limit (governance pipeline)
 │       ├── schema_builder.py         <- Schema context builder (S3 semantic model YAML)
@@ -251,10 +261,11 @@ finance-query-agent/
 │       ├── observability.py          <- Logfire initialization
 │       ├── exceptions.py             <- Exception hierarchy
 │       ├── tools/
-│       │   └── sql.py                <- execute_sql tool + asyncpg type normalization
+│       │   ├── sql.py                <- execute_sql tool + asyncpg type normalization
+│       │   └── render.py             <- Render tools (donut, bubble, cash flow, metric card, etc.)
 │       └── schemas/
-│           ├── charts.py             <- ChartIntent + VegaLiteChart models
-│           └── responses.py          <- AgentResponse, ToolCallRecord, TokenUsage
+│           ├── charts.py             <- RenderCall model (component + data)
+│           └── responses.py          <- AgentOutput, AgentResponse, ToolCallRecord, TokenUsage
 ├── tests/
 ├── terraform/
 ├── pyproject.toml

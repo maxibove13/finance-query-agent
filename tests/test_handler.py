@@ -12,7 +12,7 @@ from pydantic_ai.exceptions import UsageLimitExceeded
 import finance_query_agent.handler as handler_module
 from finance_query_agent.exceptions import ConversationConflictError
 from finance_query_agent.handler import _process_request, handler
-from finance_query_agent.schemas.responses import AnswerWithVisualization, TextAnswer
+from finance_query_agent.schemas.responses import AgentOutput
 
 _PATCH_TARGET = "finance_query_agent.handler._process_request"
 
@@ -58,7 +58,7 @@ def _build_mocks() -> dict:
 
     usage = MagicMock(input_tokens=100, output_tokens=50)
     result = MagicMock()
-    result.output = TextAnswer(answer="The answer is 42")
+    result.output = AgentOutput(answer="The answer is 42")
     result.all_messages.return_value = [{"role": "user", "content": "q"}]
     result.usage.return_value = usage
 
@@ -247,60 +247,39 @@ class TestProcessRequest:
         assert kwargs["model_settings"]["timeout"] == 12.0
 
     @pytest.mark.asyncio()
-    async def test_text_answer_skips_visualization(self, mocks: dict) -> None:
-        """TextAnswer output should never trigger the viz pipeline."""
+    async def test_render_calls_empty_by_default(self, mocks: dict) -> None:
+        """No render tools called → render_calls is empty list."""
         with ExitStack() as stack:
             _apply(stack, mocks["targets"])
-            viz_mock = stack.enter_context(
-                patch("finance_query_agent.visualization.generate_visualizations", new_callable=AsyncMock)
-            )
             resp = await _process_request(_BODY)
 
-        assert resp.visualizations is None
-        viz_mock.assert_not_awaited()
+        assert resp.render_calls == []
 
     @pytest.mark.asyncio()
-    async def test_answer_with_viz_triggers_visualization(self, mocks: dict) -> None:
-        """AnswerWithVisualization output + chartable data should trigger viz."""
-        result_mock = mocks["agent"].run.return_value
-        result_mock.output = AnswerWithVisualization(answer="Here's your breakdown")
+    async def test_render_calls_collected_from_deps(self, mocks: dict) -> None:
+        """Render tools called during agent run → render_calls in response."""
+        from finance_query_agent.schemas.charts import RenderCall
 
-        original_return = result_mock
+        render_call = RenderCall(
+            component="donut_chart",
+            data={"period": "2026-03", "currency": "USD", "slices": [{"category": "Food", "value": 450}]},
+        )
 
-        async def _run_with_results(*args, **kwargs):
+        original_return = mocks["agent"].run.return_value
+
+        async def _run_with_render(*args, **kwargs):
             deps = kwargs["deps"]
-            deps.tool_results = [("execute_sql", ["a", "b"])]
+            deps.render_calls.append(render_call)
             return original_return
 
-        mocks["agent"].run = AsyncMock(side_effect=_run_with_results)
-
-        from finance_query_agent.schemas.charts import VegaLiteChart
-
-        chart = VegaLiteChart(
-            spec={
-                "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
-                "title": "Test",
-                "mark": "bar",
-                "data": {"values": [{"x": "A", "y": 60}, {"x": "B", "y": 40}]},
-                "encoding": {"x": {"field": "x"}, "y": {"field": "y"}},
-            }
-        )
+        mocks["agent"].run = AsyncMock(side_effect=_run_with_render)
 
         with ExitStack() as stack:
             _apply(stack, mocks["targets"])
-            stack.enter_context(patch("finance_query_agent.visualization.should_visualize", return_value=True))
-            stack.enter_context(
-                patch(
-                    "finance_query_agent.visualization.generate_visualizations",
-                    new_callable=AsyncMock,
-                    return_value=[chart],
-                )
-            )
             resp = await _process_request(_BODY)
 
-        assert resp.answer == "Here's your breakdown"
-        assert resp.visualizations is not None
-        assert len(resp.visualizations) == 1
+        assert len(resp.render_calls) == 1
+        assert resp.render_calls[0].component == "donut_chart"
 
     @pytest.mark.asyncio()
     async def test_audit_called_on_usage_limit_exceeded(self, mocks: dict) -> None:
@@ -355,35 +334,6 @@ class TestProcessRequest:
             resp = await _process_request(_BODY)
 
         assert resp.answer == "The answer is 42"
-
-    @pytest.mark.asyncio()
-    async def test_answer_with_viz_skips_when_guardrails_fail(self, mocks: dict) -> None:
-        """AnswerWithVisualization but only 1 row (not enough to chart) should not trigger viz."""
-        result_mock = mocks["agent"].run.return_value
-        result_mock.output = AnswerWithVisualization(answer="No chart for you")
-
-        original_return = result_mock
-
-        async def _run_with_results(*args, **kwargs):
-            deps = kwargs["deps"]
-            deps.tool_results = [("execute_sql", [{"only": "one row"}])]  # 1 row → should_visualize=False
-            return original_return
-
-        mocks["agent"].run = AsyncMock(side_effect=_run_with_results)
-
-        with ExitStack() as stack:
-            _apply(stack, mocks["targets"])
-            viz_mock = stack.enter_context(
-                patch(
-                    "finance_query_agent.visualization.generate_visualizations",
-                    new_callable=AsyncMock,
-                )
-            )
-            resp = await _process_request(_BODY)
-
-        assert resp.answer == "No chart for you"
-        assert resp.visualizations is None
-        viz_mock.assert_not_awaited()
 
 
 class TestInputValidation:
@@ -479,6 +429,34 @@ class TestInputValidation:
 
         args = mocks["memory"].save_history.call_args[0]
         assert args[1] == "s1"
+
+    @pytest.mark.asyncio()
+    async def test_rejects_bool_user_id(self, mocks: dict) -> None:
+        with ExitStack() as stack:
+            _apply(stack, mocks["targets"])
+            with pytest.raises(ValueError, match="got bool"):
+                await _process_request({"user_id": True, "session_id": "s1", "question": "test?"})
+
+    @pytest.mark.asyncio()
+    async def test_accepts_string_user_id(self, mocks: dict) -> None:
+        with ExitStack() as stack:
+            _apply(stack, mocks["targets"])
+            resp = await _process_request({"user_id": "5", "session_id": "s1", "question": "test?"})
+        assert resp.original_question == "test?"
+
+    @pytest.mark.asyncio()
+    async def test_rejects_non_numeric_string_user_id(self, mocks: dict) -> None:
+        with ExitStack() as stack:
+            _apply(stack, mocks["targets"])
+            with pytest.raises(ValueError, match="positive integer"):
+                await _process_request({"user_id": "abc", "session_id": "s1", "question": "test?"})
+
+    @pytest.mark.asyncio()
+    async def test_rejects_zero_string_user_id(self, mocks: dict) -> None:
+        with ExitStack() as stack:
+            _apply(stack, mocks["targets"])
+            with pytest.raises(ValueError, match="positive integer"):
+                await _process_request({"user_id": "0", "session_id": "s1", "question": "test?"})
 
 
 class TestConversationConflict:

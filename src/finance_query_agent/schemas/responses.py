@@ -6,22 +6,17 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from finance_query_agent.schemas.charts import VegaLiteChart
+from finance_query_agent.schemas.charts import RenderCall
 
 
-class TextAnswer(BaseModel):
-    """Text-only answer."""
+class AgentOutput(BaseModel):
+    """Structured output from the query agent — text answer only.
 
-    answer: str
-
-
-class AnswerWithVisualization(BaseModel):
-    """Text answer with a request for chart generation from the tool results."""
+    Visualization is handled by render tools that the agent calls directly,
+    not by a separate field on the output.
+    """
 
     answer: str
-
-
-AgentOutput = TextAnswer | AnswerWithVisualization
 
 
 class ToolCallRecord(BaseModel):
@@ -39,7 +34,7 @@ class TokenUsage(BaseModel):
 class AgentResponse(BaseModel):
     answer: str
     tool_calls: list[ToolCallRecord]
-    visualizations: list[VegaLiteChart] | None = None
+    render_calls: list[RenderCall]
     unresolved: bool
     original_question: str
     token_usage: TokenUsage

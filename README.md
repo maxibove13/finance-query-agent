@@ -2,13 +2,13 @@
 
 AI-powered financial query agent. Answers natural language questions about spending, income, and transactions. Deployed as an AWS Lambda invoked by MPI's backend via `boto3 lambda.invoke()`.
 
-Uses a **text-to-SQL** architecture: the LLM writes SQL against a semantic model; a governance layer validates every query before execution. A secondary visualization agent generates Vega-Lite chart specs when the data is chartable.
+Uses a **text-to-SQL** architecture: the LLM writes SQL against a semantic model; a governance layer validates every query before execution. The agent calls render tools to produce generative UI components (Recharts-based) when the data is chartable.
 
 ## Architecture
 
 ```mermaid
 graph TB
-    subgraph Client["Client - MPI"]
+    subgraph Client["Client (MPI)"]
         FE[React Frontend]
         BE[FastAPI Backend]
     end
@@ -16,11 +16,11 @@ graph TB
     FE -->|question| BE
     BE -->|boto3 invoke| HANDLER
 
-    subgraph AWS
-        subgraph Lambda["Lambda - 30s timeout"]
+    subgraph AWS["AWS"]
+        subgraph Lambda["Lambda (30s timeout)"]
             HANDLER[handler.py]
             HANDLER --> AGENT
-            AGENT["Query Agent - gpt-4.1"]
+            AGENT["Query Agent<br/><i>gpt-4.1 · Pydantic AI</i>"]
             AGENT --> SQL_TOOL
 
             subgraph SQL_TOOL["SQL Tool"]
@@ -29,31 +29,43 @@ graph TB
 
             subgraph GOV["SQL Governance"]
                 R1["SELECT-only"]
-                R2["LIMIT cap 200"]
+                R2["LIMIT cap (200)"]
                 R3["EXPLAIN pre-flight"]
-                R4["Block CROSS JOIN"]
+                R4["Block CROSS JOIN / set_config"]
             end
 
             SQL_TOOL --> GOV
 
-            AGENT -->|visualize| VIZ
-            VIZ["Viz Agent - gpt-4.1-mini"]
+            AGENT --> RENDER
+            subgraph RENDER["Render Tools"]
+                RT1[render_donut_chart]
+                RT2[render_cash_flow]
+                RT3[render_metric_card]
+                RT4[render_bubble_chart]
+                RT5[render_category_breakdown]
+                RT6[render_cash_flow_historical]
+            end
         end
 
-        S3[("S3 - semantic model")]
-        RDS[("RDS PostgreSQL")]
-        DDB[("DynamoDB")]
+        S3[("S3<br/><i>semantic model YAML</i>")]
+        RDS[("RDS PostgreSQL<br/><i>read-only + RLS</i>")]
+        DDB[("DynamoDB<br/><i>conversation + audit</i>")]
     end
 
-    LOGFIRE["Logfire"]
+    LOGFIRE["Logfire<br/><i>PII-scrubbed traces</i>"]
 
     S3 -.->|cold start| AGENT
     GOV -->|governed queries| RDS
-    HANDLER -->|encrypted history| DDB
-    DDB -->|load history| HANDLER
-    AGENT -->|inference| LLM_API["OpenAI API"]
-    LLM_API -->|response| AGENT
+    HANDLER <-->|Fernet-encrypted history| DDB
+    AGENT <-->|inference| LLM_API["OpenAI API"]
     HANDLER -.->|traces| LOGFIRE
+
+    style SQL_TOOL fill:#2d5a3d,stroke:#4a9,color:#fff
+    style GOV fill:#2d5a3d,stroke:#4a9,color:#fff
+    style RENDER fill:#3a3a5c,stroke:#88c,color:#fff
+    style RDS fill:#1a3a5c,stroke:#4a9,color:#fff
+    style DDB fill:#1a3a5c,stroke:#4a9,color:#fff
+    style S3 fill:#1a3a5c,stroke:#4a9,color:#fff
 ```
 
 ## Request Lifecycle
@@ -62,45 +74,42 @@ graph TB
 sequenceDiagram
     participant Client as MPI Backend
     participant Lambda as Agent Lambda
-    participant LLM as OpenAI gpt-4.1
+    participant LLM as OpenAI (gpt-4.1)
     participant PG as PostgreSQL
     participant Dynamo as DynamoDB
 
     Client->>Lambda: boto3 lambda.invoke()
 
     Lambda->>Dynamo: Load conversation history
-    Dynamo-->>Lambda: Encrypted messages
+    Dynamo-->>Lambda: Encrypted messages (Fernet)
 
     Lambda->>LLM: System prompt + semantic model + history + question
-    LLM-->>Lambda: Tool call execute_sql
+    LLM-->>Lambda: Tool call: execute_sql(sql)
 
     Note over Lambda: SQL Governance validates query
-    Lambda->>PG: Governed SQL, RLS-scoped, LIMIT enforced
+    Lambda->>PG: Governed SQL (RLS-scoped, LIMIT enforced)
     PG-->>Lambda: Query results
 
     Lambda->>LLM: Tool results
-    LLM-->>Lambda: AgentOutput with answer + viz_data
+    LLM-->>Lambda: AgentOutput (answer)
 
-    opt viz_data present AND time budget remaining
-        Lambda->>LLM: Viz agent gpt-4.1-mini with question + viz_data
-        LLM-->>Lambda: Vega-Lite chart specs
-    end
+    Note over Lambda: Render tool calls (if any) collected as RenderCalls
 
-    Lambda->>Dynamo: Save updated history, encrypted
-    Lambda->>Dynamo: Write audit log, PII-redacted
-    Lambda-->>Client: AgentResponse with answer + charts
+    Lambda->>Dynamo: Save updated history (encrypted)
+    Lambda->>Dynamo: Write audit log (PII-redacted)
+    Lambda-->>Client: AgentResponse (answer + render_calls)
 ```
 
 ## Semantic Model
 
-The schema context injected into the system prompt is built from a **semantic model** — a YAML file describing tables, columns, relationships, metrics, and verified queries. Fetched from S3 at cold start and cached for the Lambda instance lifetime. No DB introspection.
+The schema context injected into the system prompt is built from a **semantic model** — a YAML file describing tables, columns, relationships, metrics, filters, and verified queries. Fetched from S3 at cold start and cached for the Lambda instance lifetime. No DB introspection.
 
 The semantic model defines:
 - **Tables & columns** with types, descriptions, synonyms, and enum values
 - **Relationships** (JOIN definitions between tables)
 - **Metrics** (pre-defined aggregations like `SUM(amount) WHERE movement_direction = 'DEBIT'`)
 - **Verified queries** (example question-SQL pairs for few-shot guidance)
-- **Business rules** (custom instructions for currency conversion, tag mapping, etc.)
+- **Business rules** (custom instructions for edge cases)
 
 For local development, set `SEMANTIC_MODEL_LOCAL_PATH` to use a local YAML file instead of S3.
 
@@ -141,14 +150,13 @@ Response:
       "row_count": 3
     }
   ],
-  "visualizations": [
+  "render_calls": [
     {
-      "spec": {
-        "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
-        "mark": "arc",
-        "title": "Grocery Spending",
-        "data": { "values": ["..."] },
-        "encoding": { "...": "..." }
+      "component": "donut_chart",
+      "data": {
+        "period": "2026-03",
+        "currency": "USD",
+        "slices": [{"category": "Supermarket", "value": 150.00}, {"category": "Market", "value": 85.50}]
       }
     }
   ],
@@ -158,7 +166,7 @@ Response:
 }
 ```
 
-`visualizations` is `null` when `visualize=false` or the data isn't chartable (< 2 rows). Chart types: `bar`, `line`, `pie`, `area`, `scatter`, `heatmap`, `stacked_bar`, `grouped_bar`.
+`render_calls` is an empty list when the agent does not call any render tools. Available components: `donut_chart`, `bubble_chart`, `cash_flow`, `cash_flow_historical`, `category_breakdown`, `metric_card`.
 
 ## Project Structure
 
@@ -166,8 +174,6 @@ Response:
 src/finance_query_agent/
 ├── handler.py              Lambda entry point
 ├── agent.py                Query agent (gpt-4.1) + system prompt
-├── visualization.py        Visualization agent (gpt-4.1-mini, Vega-Lite)
-├── vega_builder.py         ChartIntent → Vega-Lite v5 spec
 ├── config.py               Settings from env vars (pydantic-settings)
 ├── schema_builder.py       Semantic model (S3 YAML → system prompt context)
 ├── sql_governance.py       SQL validation (SELECT-only, LIMIT, EXPLAIN)
@@ -179,10 +185,12 @@ src/finance_query_agent/
 ├── redaction.py            Regex PII scrubbing
 ├── observability.py        Logfire initialization + scrubbing callback
 ├── exceptions.py           Exception hierarchy
+├── validation/             Input validation (placeholder)
 ├── tools/
-│   └── sql.py              execute_sql tool + asyncpg type normalization
+│   ├── sql.py              execute_sql tool + asyncpg type normalization
+│   └── render.py           Render tools (donut, bubble, cash flow, metric card, etc.)
 └── schemas/
-    ├── charts.py           ChartIntent + VegaLiteChart models
+    ├── charts.py           RenderCall model (component + data)
     └── responses.py        AgentOutput, AgentResponse, ToolCallRecord, TokenUsage
 ```
 

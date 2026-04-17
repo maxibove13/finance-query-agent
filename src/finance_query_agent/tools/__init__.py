@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from finance_query_agent.connection import Connection
+from finance_query_agent.schemas.charts import RenderCall
 from finance_query_agent.schemas.responses import ToolCallRecord
 
 
@@ -15,3 +16,4 @@ class AgentDeps:
     user_id: Any
     tool_calls: list[ToolCallRecord] = field(default_factory=list)
     tool_results: list[tuple[str, Any]] = field(default_factory=list)
+    render_calls: list[RenderCall] = field(default_factory=list)

@@ -6,8 +6,8 @@ Deploy and test the finance-query-agent Lambda locally using LocalStack.
 
 ### Step 1: Check prerequisites
 
-1. Verify `.env.localstack` exists in the project root. If not, tell the user:
-   > Copy `.env.localstack.example` to `.env.localstack` and set `DATABASE_URL` and `OPENAI_API_KEY`.
+1. Verify `.env` exists in the project root. If not, tell the user:
+   > Copy `.env.example` to `.env` and set `DATABASE_URL` and `OPENAI_API_KEY`.
 2. Verify Docker is running: `docker info > /dev/null 2>&1`
 
 ### Step 2: Deploy
@@ -74,7 +74,7 @@ This stops LocalStack and removes the `localstack/volume` directory. Docker Comp
 
 ## Gotchas
 
-- **`QUERY_MODEL` not `LLM_MODEL`**: The app reads from `Settings.query_model`. Terraform and the setup script must use `QUERY_MODEL`.
+- **`PRIMARY_MODEL` / `SECONDARY_MODEL`**: The app reads from `Settings.primary_model` and `Settings.secondary_model`. Use these env var names in `.env` and Terraform.
 - **SSO token interference**: If your default AWS profile uses SSO, expired tokens can break LocalStack CLI calls even with dummy creds. The setup script exports `AWS_ACCESS_KEY_ID=test` to override.
 - **Zip must be < 250MB unzipped**: The setup script strips unused pydantic-ai provider deps (temporalio, cohere, anthropic, mistral, etc.) to stay under the limit.
 - **`--cli-binary-format raw-in-base64-out`**: Required for AWS CLI v2 Lambda invoke payloads.

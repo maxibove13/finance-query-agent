@@ -51,8 +51,7 @@ Browser -> MPI API Gateway -> MPI Lambda -> boto3 invoke -> Agent Lambda
 |------|-------|
 | Lambda handler (entry point) | `src/finance_query_agent/handler.py` |
 | Query agent definition (Pydantic AI) | `src/finance_query_agent/agent.py` |
-| Visualization agent (Vega-Lite chart specs) | `src/finance_query_agent/visualization.py` |
-| Vega-Lite spec builder (intent → full spec) | `src/finance_query_agent/vega_builder.py` |
+| Render tools (generative UI components) | `src/finance_query_agent/tools/render.py` |
 | Settings from env vars | `src/finance_query_agent/config.py` |
 | Schema context builder (S3 semantic model) | `src/finance_query_agent/schema_builder.py` |
 | SQL governance (SELECT-only, LIMIT, EXPLAIN) | `src/finance_query_agent/sql_governance.py` |
@@ -64,6 +63,7 @@ Browser -> MPI API Gateway -> MPI Lambda -> boto3 invoke -> Agent Lambda
 | Conversation summarization | `src/finance_query_agent/history.py` |
 | Logfire initialization | `src/finance_query_agent/observability.py` |
 | `execute_sql` tool | `src/finance_query_agent/tools/sql.py` |
+| Input validation (placeholder) | `src/finance_query_agent/validation/` |
 | Pydantic models (charts, responses) | `src/finance_query_agent/schemas/` |
 | Exception hierarchy | `src/finance_query_agent/exceptions.py` |
 | Terraform module | `terraform/` |
@@ -74,12 +74,14 @@ Browser -> MPI API Gateway -> MPI Lambda -> boto3 invoke -> Agent Lambda
 - **Service, not SDK:** Lambda invoked by MPI's backend via `boto3 lambda.invoke()` (30s timeout). Synchronous request-response.
 - **Text-to-SQL:** Single `execute_sql` tool. The LLM writes SQL against a schema injected into the system prompt; a governance layer validates every query before execution.
 - **Schema from S3:** Semantic model (YAML) fetched from S3 at cold start by `schema_builder.py`. No DB introspection — the YAML is the sole source of truth.
-- **Two models:** `primary_model` (gpt-4.1) for the query agent, `secondary_model` (gpt-4.1-mini) for visualization and history summarization.
+- **Generative UI:** Visualization via render tools (donut_chart, bubble_chart, cash_flow, etc.) called by the primary agent — returns structured data matching frontend React components. No secondary LLM for charts.
+- **Two models:** `primary_model` (gpt-4.1) for the query agent, `secondary_model` (gpt-4.1-mini) for history summarization.
 - **Multi-currency:** The semantic model includes `historical_exchange_rates` and `latest_exchange_rates_mv` for SQL-level currency conversion (USD ↔ UYU/ARS/BRL/EUR). The `execute_sql` tool returns raw per-transaction currency values; the LLM formats and groups them in the answer.
 - **User isolation:** Every query scoped to `user_id` via PostgreSQL RLS. Injected by the service, never by the LLM.
 - **Read-only:** No write operations. Enforced at DB role level (security boundary).
 - **PII protection:** Two layers — Fernet encryption at rest (DynamoDB), regex scrubbing in audit logs and traces (Logfire). No NER models.
 - **Connection pool:** `asyncpg` pool (min 1, max 5) cached at module level across warm Lambda invocations. Stale pools (loop mismatch) detected and replaced.
+- **Structured output:** The query agent uses Pydantic AI structured output (`AgentOutput` with `answer`). Render tools append `RenderCall` objects to deps; the handler collects them into the `render_calls` response field.
 - **Audit trail:** Every invocation logged to a DynamoDB audit table with PII-redacted SQL, row counts, timing, and token usage. 90-day TTL.
 
 ## Branching
