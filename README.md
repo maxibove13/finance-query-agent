@@ -2,7 +2,7 @@
 
 AI-powered financial query agent. Answers natural language questions about spending, income, and transactions. Deployed as an AWS Lambda invoked by MPI's backend via `boto3 lambda.invoke()`.
 
-Uses a **text-to-SQL** architecture: the LLM writes SQL against a semantic model; a governance layer validates every query before execution. A secondary visualization agent generates Vega-Lite chart specs when the data is chartable.
+Uses a **text-to-SQL** architecture: the LLM writes SQL against a semantic model; a governance layer validates every query before execution. The agent calls render tools to produce generative UI components (Recharts-based) when the data is chartable.
 
 ## Architecture
 
@@ -36,8 +36,15 @@ graph TB
 
             SQL_TOOL --> GOV
 
-            AGENT -->|"visualize=true"| VIZ
-            VIZ["Viz Agent<br/><i>gpt-4.1-mini</i>"]
+            AGENT --> RENDER
+            subgraph RENDER["Render Tools"]
+                RT1[render_donut_chart]
+                RT2[render_cash_flow]
+                RT3[render_metric_card]
+                RT4[render_bubble_chart]
+                RT5[render_category_breakdown]
+                RT6[render_cash_flow_historical]
+            end
         end
 
         S3[("S3<br/><i>semantic model YAML</i>")]
@@ -51,12 +58,11 @@ graph TB
     GOV -->|governed queries| RDS
     HANDLER <-->|Fernet-encrypted history| DDB
     AGENT <-->|inference| LLM_API["OpenAI API"]
-    VIZ <-->|inference| LLM_API
     HANDLER -.->|traces| LOGFIRE
 
     style SQL_TOOL fill:#2d5a3d,stroke:#4a9,color:#fff
     style GOV fill:#2d5a3d,stroke:#4a9,color:#fff
-    style VIZ fill:#3a3a5c,stroke:#88c,color:#fff
+    style RENDER fill:#3a3a5c,stroke:#88c,color:#fff
     style RDS fill:#1a3a5c,stroke:#4a9,color:#fff
     style DDB fill:#1a3a5c,stroke:#4a9,color:#fff
     style S3 fill:#1a3a5c,stroke:#4a9,color:#fff
@@ -85,16 +91,13 @@ sequenceDiagram
     PG-->>Lambda: Query results
 
     Lambda->>LLM: Tool results
-    LLM-->>Lambda: AgentOutput (answer + visualize flag)
+    LLM-->>Lambda: AgentOutput (answer)
 
-    opt visualize=true AND chartable data >= 2 rows
-        Lambda->>LLM: Viz agent (gpt-4.1-mini): question + data
-        LLM-->>Lambda: Vega-Lite chart specs
-    end
+    Note over Lambda: Render tool calls (if any) collected as RenderCalls
 
     Lambda->>Dynamo: Save updated history (encrypted)
     Lambda->>Dynamo: Write audit log (PII-redacted)
-    Lambda-->>Client: AgentResponse (answer + charts)
+    Lambda-->>Client: AgentResponse (answer + render_calls)
 ```
 
 ## Semantic Model
@@ -147,14 +150,13 @@ Response:
       "row_count": 3
     }
   ],
-  "visualizations": [
+  "render_calls": [
     {
-      "spec": {
-        "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
-        "mark": "arc",
-        "title": "Grocery Spending",
-        "data": { "values": ["..."] },
-        "encoding": { "...": "..." }
+      "component": "donut_chart",
+      "data": {
+        "period": "2026-03",
+        "currency": "USD",
+        "slices": [{"category": "Supermarket", "value": 150.00}, {"category": "Market", "value": 85.50}]
       }
     }
   ],
@@ -164,7 +166,7 @@ Response:
 }
 ```
 
-`visualizations` is `null` when `visualize=false` or the data isn't chartable (< 2 rows). Chart types: `bar`, `line`, `pie`, `area`, `scatter`, `heatmap`, `stacked_bar`, `grouped_bar`.
+`render_calls` is an empty list when the agent does not call any render tools. Available components: `donut_chart`, `bubble_chart`, `cash_flow`, `cash_flow_historical`, `category_breakdown`, `metric_card`.
 
 ## Project Structure
 
@@ -172,8 +174,6 @@ Response:
 src/finance_query_agent/
 ├── handler.py              Lambda entry point
 ├── agent.py                Query agent (gpt-4.1) + system prompt
-├── visualization.py        Visualization agent (gpt-4.1-mini, Vega-Lite)
-├── vega_builder.py         ChartIntent → Vega-Lite v5 spec
 ├── config.py               Settings from env vars (pydantic-settings)
 ├── schema_builder.py       Semantic model (S3 YAML → system prompt context)
 ├── sql_governance.py       SQL validation (SELECT-only, LIMIT, EXPLAIN)
@@ -185,10 +185,12 @@ src/finance_query_agent/
 ├── redaction.py            Regex PII scrubbing
 ├── observability.py        Logfire initialization + scrubbing callback
 ├── exceptions.py           Exception hierarchy
+├── validation/             Input validation (placeholder)
 ├── tools/
-│   └── sql.py              execute_sql tool + asyncpg type normalization
+│   ├── sql.py              execute_sql tool + asyncpg type normalization
+│   └── render.py           Render tools (donut, bubble, cash flow, metric card, etc.)
 └── schemas/
-    ├── charts.py           ChartIntent + VegaLiteChart models
+    ├── charts.py           RenderCall model (component + data)
     └── responses.py        AgentOutput, AgentResponse, ToolCallRecord, TokenUsage
 ```
 

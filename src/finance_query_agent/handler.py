@@ -165,6 +165,7 @@ async def _process_request(body: dict[str, Any]) -> AgentResponse:
                     " Please try rephrasing it or breaking it into simpler parts."
                 ),
                 tool_calls=deps.tool_calls,
+                render_calls=deps.render_calls,
                 unresolved=True,
                 original_question=question,
                 token_usage=TokenUsage(input_tokens=0, output_tokens=0),
@@ -201,35 +202,11 @@ async def _process_request(body: dict[str, Any]) -> AgentResponse:
             except Exception:
                 logger.warning("Audit write failed", exc_info=True)
 
-        # Agent-decided visualization with programmatic guardrails
-        from finance_query_agent.schemas.responses import AnswerWithVisualization
-        from finance_query_agent.visualization import generate_visualizations, should_visualize
-
-        output = result.output
-        answer_text = output.answer
-
-        visualizations = None
-        if isinstance(output, AnswerWithVisualization) and deps.tool_results and should_visualize(deps.tool_results):
-            elapsed = time.monotonic() - request_start
-            viz_budget = settings.request_budget - elapsed - 1.0  # 1s reserve for response serialization
-            if viz_budget > 0.5:
-                try:
-                    visualizations = await asyncio.wait_for(
-                        generate_visualizations(
-                            question=question,
-                            tool_results=deps.tool_results,
-                            model=settings.secondary_model,
-                        ),
-                        timeout=viz_budget,
-                    )
-                except TimeoutError:
-                    logger.warning("Visualization timed out (budget=%.1fs)", viz_budget)
-
         # Build response
         return AgentResponse(
-            answer=answer_text,
+            answer=result.output.answer,
             tool_calls=deps.tool_calls,
-            visualizations=visualizations,
+            render_calls=deps.render_calls,
             unresolved=not deps.tool_calls,
             original_question=question,
             token_usage=TokenUsage(

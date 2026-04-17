@@ -12,7 +12,8 @@ from finance_query_agent.agent import build_system_prompt, get_agent
 _TEST_MODEL = TestModel()
 
 _FAKE_SCHEMA = (
-    "tables:\n  account_movements:\n  accounts:\n  credit_card_movements:\ncolumns:\n  movement_direction: text"
+    "tables:\n  account_movements:\n  accounts:\n  credit_card_movements:\n"
+    "columns:\n  movement_direction: text [values: DEBIT, CREDIT]"
 )
 
 
@@ -30,14 +31,14 @@ class TestBuildSystemPrompt:
 
     def test_includes_amount_convention(self) -> None:
         prompt = build_system_prompt(_FAKE_SCHEMA)
-        assert "debit" in prompt
-        assert "credit" in prompt
+        assert "DEBIT" in prompt
+        assert "CREDIT" in prompt
 
-    def test_includes_visualization_guidance(self) -> None:
+    def test_includes_render_tool_guidance(self) -> None:
         prompt = build_system_prompt(_FAKE_SCHEMA)
-        assert "final_answer_with_chart" in prompt
-        assert "final_answer" in prompt
-        assert "visualization agent" in prompt
+        assert "render_donut_chart" in prompt
+        assert "render_metric_card" in prompt
+        assert "render tool" in prompt
 
     def test_includes_language_mirroring(self) -> None:
         prompt = build_system_prompt(_FAKE_SCHEMA)
@@ -62,20 +63,23 @@ class TestGetAgent:
     def teardown_method(self) -> None:
         agent_module._agents.clear()
 
-    def test_returns_agent_with_execute_sql_tool(self) -> None:
+    def test_returns_agent_with_all_tools(self) -> None:
         agent = get_agent(_TEST_MODEL)
         tool_names = set(agent._function_toolset.tools.keys())
-        assert tool_names == {"execute_sql"}
+        assert "execute_sql" in tool_names
+        assert "render_donut_chart" in tool_names
+        assert "render_metric_card" in tool_names
+        assert "render_cash_flow" in tool_names
 
     def test_singleton_behavior(self) -> None:
         a1 = get_agent(_TEST_MODEL)
         a2 = get_agent(_TEST_MODEL)
         assert a1 is a2
 
-    def test_has_output_tools(self) -> None:
+    def test_has_structured_output(self) -> None:
         agent = get_agent(_TEST_MODEL)
         output_tool_names = {t.name for t in agent._output_toolset._tool_defs}
-        assert output_tool_names == {"final_answer", "final_answer_with_chart"}
+        assert "final_result" in output_tool_names
 
     def test_retries_set_to_three(self) -> None:
         agent = get_agent(_TEST_MODEL)

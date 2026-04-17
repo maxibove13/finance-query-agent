@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-ENV_FILE="$PROJECT_DIR/.env.localstack"
+ENV_FILE="$PROJECT_DIR/.env"
 ENDPOINT="http://localhost:4566"
 FUNCTION_NAME="finance-query-agent"
 TABLE_NAME="finance-agent-conversations"
@@ -17,7 +17,7 @@ export AWS_DEFAULT_REGION=$REGION
 
 if [ ! -f "$ENV_FILE" ]; then
   echo "ERROR: $ENV_FILE not found."
-  echo "Copy .env.localstack.example to .env.localstack and fill in your values."
+  echo "Copy .env.example to .env and fill in your values."
   exit 1
 fi
 
@@ -25,8 +25,8 @@ set -a
 source "$ENV_FILE"
 set +a
 
-: "${DATABASE_URL:?DATABASE_URL must be set in .env.localstack}"
-: "${OPENAI_API_KEY:?OPENAI_API_KEY must be set in .env.localstack}"
+: "${DATABASE_URL:?DATABASE_URL must be set in .env}"
+: "${OPENAI_API_KEY:?OPENAI_API_KEY must be set in .env}"
 
 # ── 2. Start LocalStack ─────────────────────────────────────────────────────
 
@@ -148,10 +148,12 @@ env = {
         'AWS_ENDPOINT_URL': 'http://host.docker.internal:4566',
         'AWS_ACCESS_KEY_ID': 'test',
         'AWS_SECRET_ACCESS_KEY': 'test',
+        'LOGFIRE_TOKEN': sys.argv[10],
+        'OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT': '10000',
     }
 }
 print(json.dumps(env))
-" "$DATABASE_URL" "$OPENAI_API_KEY" "${QUERY_MODEL:-openai:gpt-4.1}" "${SECONDARY_MODEL:-openai:gpt-4.1-mini}" "$TABLE_NAME" "$REGION" "$ENCRYPTION_KEY" "$SEMANTIC_BUCKET" "$SEMANTIC_KEY")
+" "$DATABASE_URL" "$OPENAI_API_KEY" "${PRIMARY_MODEL:-openai:gpt-4.1}" "${SECONDARY_MODEL:-openai:gpt-4.1-mini}" "$TABLE_NAME" "$REGION" "$ENCRYPTION_KEY" "$SEMANTIC_BUCKET" "$SEMANTIC_KEY" "${LOGFIRE_TOKEN:-}")
 
 # ── 7. Create Lambda function ───────────────────────────────────────────────
 

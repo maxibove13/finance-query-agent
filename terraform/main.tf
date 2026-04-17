@@ -121,6 +121,7 @@ resource "aws_lambda_function" "agent" {
       ENCRYPTION_KEY_SECRET_ARN = aws_secretsmanager_secret.encryption_key.arn
       LLM_API_KEY_SECRET_ARN    = aws_secretsmanager_secret.llm_api_key.arn
       LOGFIRE_TOKEN_SECRET_ARN  = aws_secretsmanager_secret.logfire_token.arn
+      OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT = "10000"
     }
   }
 
